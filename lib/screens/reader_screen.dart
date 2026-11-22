@@ -6,11 +6,13 @@ import '../services/translation_queue.dart';
 class ReaderScreen extends StatefulWidget {
   final Book book;
   final TranslationQueueController queueController;
+  final String targetLanguage;
 
   const ReaderScreen({
     super.key,
     required this.book,
     required this.queueController,
+    required this.targetLanguage,
   });
 
   @override
@@ -32,7 +34,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
     super.initState();
     _initData();
     widget.queueController.progressStream.listen((_) {
-      // Обновляем абзацы и статусы глав по мере поступления перевода
       _refreshCurrentChapter(silent: true);
       _refreshChaptersList();
     });
@@ -87,7 +88,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       currentReadingChapter: _currentChapterIndex,
       mode: overrideMode ?? _selectedMode,
       chaptersAhead: overrideAhead ?? _chaptersAhead,
-      targetLanguage: 'русский',
+      targetLanguage: widget.targetLanguage,
     );
   }
 
@@ -133,7 +134,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
       ),
       body: Column(
         children: [
-          // Панель управления очередью перевода
           StreamBuilder<TranslationProgress>(
             stream: widget.queueController.progressStream,
             initialData: const TranslationProgress(),
@@ -229,8 +229,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
               );
             },
           ),
-
-          // Навигация по главам
           if (_chapters.isNotEmpty)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -271,10 +269,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 ],
               ),
             ),
-
           const Divider(height: 1),
-
-          // Текст главы
           Expanded(
             child: _loadingChapter
                 ? const Center(child: CircularProgressIndicator())
