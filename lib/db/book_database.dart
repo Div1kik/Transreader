@@ -52,6 +52,30 @@ class BookDatabase {
     );
   }
 
+  Future<List<Book>> getBooks() async {
+    final db = await instance.database;
+    final rows = await db.query('books');
+    return rows
+        .map(
+          (r) => Book(
+            id: r['id'] as String,
+            title: r['title'] as String,
+            format: r['format'] as String,
+            totalChapters: r['totalChapters'] as int,
+          ),
+        )
+        .toList();
+  }
+
+  Future<void> deleteBook(String bookId) async {
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      await txn.delete('paragraphs', where: 'bookId = ?', whereArgs: [bookId]);
+      await txn.delete('chapters', where: 'bookId = ?', whereArgs: [bookId]);
+      await txn.delete('books', where: 'id = ?', whereArgs: [bookId]);
+    });
+  }
+
   Future<void> insertBookWithChapters(
     Book book,
     List<Chapter> chapters,
