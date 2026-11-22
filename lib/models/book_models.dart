@@ -52,3 +52,17 @@ class ParagraphItem {
   bool get isTranslated =>
       translatedText != null && translatedText!.trim().isNotEmpty;
 }
+
+class TranslatorSettings {
+  final String endpointUrl;
+  final String apiKey;
+  final String model;
+  final String targetLanguage;
+
+  const TranslatorSettings({
+    this.endpointUrl = 'https://api.openai.com/v1/chat/completions',
+    this.apiKey = '',
+    this.model = 'gpt-4o-mini',
+    this.targetLanguage = 'русский',
+  });
+}
