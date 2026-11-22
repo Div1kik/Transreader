@@ -35,7 +35,7 @@ class TranslationProgress {
   }) {
     return TranslationProgress(
       currentChapter: currentChapter ?? this.currentChapter,
-      totalChaptersInJob: totalChaptersInJob ?? this.totalChaptersInChapter,
+      totalChaptersInJob: totalChaptersInJob ?? this.totalChaptersInJob,
       translatedParagraphsInChapter:
           translatedParagraphsInChapter ?? this.translatedParagraphsInChapter,
       totalParagraphsInChapter:
@@ -104,7 +104,8 @@ class TranslationQueueController {
 
       final chapter = targetChapters[i];
       final paragraphs = await db.getChapterParagraphs(bookId, chapter.index);
-      final pendingParagraphs = paragraphs.where((p) => !p.isTranslated).toList();
+      final pendingParagraphs =
+          paragraphs.where((p) => !p.isTranslated).toList();
 
       if (pendingParagraphs.isEmpty) {
         await db.updateChapterStatus(
@@ -126,7 +127,6 @@ class TranslationQueueController {
       for (int offset = 0; offset < pendingParagraphs.length; offset += batchSize) {
         if (_cancelled) break;
 
-        // Ждём появления сети, если интернет пропал
         while (!await _hasNetwork()) {
           if (_cancelled) break;
           _progress = _progress.copyWith(
