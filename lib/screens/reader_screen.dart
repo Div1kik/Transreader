@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../db/book_database.dart';
 import '../models/book_models.dart';
@@ -28,12 +29,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   TranslateMode _selectedMode = TranslateMode.nextChapters;
   int _chaptersAhead = 3;
+  StreamSubscription<TranslationProgress>? _progressSub;
 
   @override
   void initState() {
     super.initState();
     _initData();
-    widget.queueController.progressStream.listen((_) {
+    _progressSub = widget.queueController.progressStream.listen((_) {
       _refreshCurrentChapter(silent: true);
       _refreshChaptersList();
     });
@@ -105,8 +107,18 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
   }
 
+  String _formatWaitTime(int totalSeconds) {
+    if (totalSeconds < 60) {
+      return '$totalSeconds сек';
+    }
+    final mins = totalSeconds ~/ 60;
+    final secs = totalSeconds % 60;
+    return secs > 0 ? '$mins мин $secs сек' : '$mins мин';
+  }
+
   @override
   void dispose() {
+    _progressSub?.cancel();
     widget.queueController.stop();
     widget.queueController.dispose();
     super.dispose();
@@ -139,6 +151,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
             initialData: const TranslationProgress(),
             builder: (context, snapshot) {
               final p = snapshot.data ?? const TranslationProgress();
+              final modelBadge =
+                  p.activeModel.isNotEmpty ? ' • ${p.activeModel}' : '';
+
               return Container(
                 width: double.infinity,
                 padding: const EdgeInsets.all(10),
@@ -206,21 +221,28 @@ class _ReaderScreenState extends State<ReaderScreen> {
                               ),
                       ],
                     ),
-                    if (p.isRunning || p.isPausedOffline || p.errorMessage != null)
+                    if (p.isRunning ||
+                        p.isPausedOffline ||
+                        p.rateLimitWaitSeconds > 0 ||
+                        p.errorMessage != null)
                       Padding(
                         padding: const EdgeInsets.only(top: 6),
                         child: Text(
                           p.isPausedOffline
                               ? 'Нет сети — перевод на паузе. Ждём подключение...'
-                              : p.errorMessage != null
-                                  ? 'Ошибка: ${p.errorMessage}'
-                                  : 'Глава ${p.currentChapter} (в очереди ${p.totalChaptersInJob}): '
-                                      'абзацев ${p.translatedParagraphsInChapter}/${p.totalParagraphsInChapter}',
+                              : p.rateLimitWaitSeconds > 0
+                                  ? 'Все выбранные модели в лимите — ждём квоту: ${_formatWaitTime(p.rateLimitWaitSeconds)}...'
+                                  : p.errorMessage != null
+                                      ? 'Ошибка: ${p.errorMessage}'
+                                      : 'Глава ${p.currentChapter} (в очереди ${p.totalChaptersInJob})$modelBadge: '
+                                          'абзацев ${p.translatedParagraphsInChapter}/${p.totalParagraphsInChapter}',
                           style: TextStyle(
                             fontSize: 12,
                             color: p.errorMessage != null
                                 ? Colors.redAccent
-                                : Colors.tealAccent,
+                                : p.rateLimitWaitSeconds > 0
+                                    ? Colors.amberAccent
+                                    : Colors.tealAccent,
                           ),
                         ),
                       ),
