@@ -4,6 +4,18 @@ import 'package:http/http.dart' as http;
 import '../models/book_models.dart';
 import '../services/settings_service.dart';
 
+class _ProviderPreset {
+  final String label;
+  final String endpoint;
+  final String defaultModel;
+
+  const _ProviderPreset({
+    required this.label,
+    required this.endpoint,
+    required this.defaultModel,
+  });
+}
+
 class SettingsScreen extends StatefulWidget {
   final TranslatorSettings initialSettings;
 
@@ -14,6 +26,35 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  static const List<_ProviderPreset> _presets = [
+    _ProviderPreset(
+      label: 'OpenAI',
+      endpoint: 'https://api.openai.com/v1/chat/completions',
+      defaultModel: 'gpt-4o-mini',
+    ),
+    _ProviderPreset(
+      label: 'Gemini (Free)',
+      endpoint:
+          'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+      defaultModel: 'gemini-2.5-flash',
+    ),
+    _ProviderPreset(
+      label: 'Groq (Free)',
+      endpoint: 'https://api.groq.com/openai/v1/chat/completions',
+      defaultModel: 'llama-3.3-70b-versatile',
+    ),
+    _ProviderPreset(
+      label: 'OpenRouter',
+      endpoint: 'https://openrouter.ai/api/v1/chat/completions',
+      defaultModel: 'google/gemma-2-9b-it:free',
+    ),
+    _ProviderPreset(
+      label: 'DeepSeek',
+      endpoint: 'https://api.deepseek.com/chat/completions',
+      defaultModel: 'deepseek-chat',
+    ),
+  ];
+
   late final TextEditingController _endpointCtrl;
   late final TextEditingController _apiKeyCtrl;
   late final TextEditingController _modelCtrl;
@@ -31,7 +72,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         TextEditingController(text: widget.initialSettings.endpointUrl);
     _apiKeyCtrl = TextEditingController(text: widget.initialSettings.apiKey);
     _modelCtrl = TextEditingController(text: widget.initialSettings.model);
-    _langCtrl = TextEditingController(text: widget.initialSettings.targetLanguage);
+    _langCtrl =
+        TextEditingController(text: widget.initialSettings.targetLanguage);
 
     if (widget.initialSettings.model.trim().isNotEmpty) {
       _availableModels = [widget.initialSettings.model.trim()];
@@ -45,6 +87,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _modelCtrl.dispose();
     _langCtrl.dispose();
     super.dispose();
+  }
+
+  void _applyPreset(_ProviderPreset preset) {
+    setState(() {
+      _endpointCtrl.text = preset.endpoint;
+      _modelCtrl.text = preset.defaultModel;
+      _availableModels = [preset.defaultModel];
+      _modelsError = null;
+    });
   }
 
   Uri _buildModelsUri(String rawEndpoint) {
@@ -69,7 +120,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final apiKey = _apiKeyCtrl.text.trim();
 
     if (endpoint.isEmpty) {
-      setState(() => _modelsError = 'Сначала укажи Endpoint URL');
+      setState(() => _modelsError = 'Сначала выбери сервис или укажи URL');
       return;
     }
 
@@ -97,6 +148,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final ids = data
           .map((item) => (item as Map<String, dynamic>)['id']?.toString() ?? '')
           .where((id) => id.isNotEmpty)
+          .map((id) => id.startsWith('models/') ? id.substring(7) : id)
           .toSet()
           .toList()
         ..sort();
@@ -117,7 +169,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (!mounted) return;
       setState(() {
         _modelsError =
-            'Не удалось подтянуть модели ($e). Можно вписать название вручную.';
+            'Не удалось загрузить список ($e). Проверь ключ или впиши модель вручную.';
       });
     } finally {
       if (mounted) {
@@ -153,11 +205,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          const Text(
+            'Быстрый выбор сервиса:',
+            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            children: _presets.map((preset) {
+              final active = _endpointCtrl.text.trim() == preset.endpoint;
+              return ChoiceChip(
+                label: Text(preset.label),
+                selected: active,
+                onSelected: (_) => _applyPreset(preset),
+              );
+            }).toList(),
+          ),
+          const SizedBox(height: 16),
           TextField(
             controller: _endpointCtrl,
+            onChanged: (_) => setState(() {}),
             decoration: const InputDecoration(
               labelText: 'Endpoint URL',
-              hintText: 'https://api.openai.com/v1/chat/completions',
               border: OutlineInputBorder(),
             ),
           ),
@@ -186,7 +256,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   onChanged: (_) => setState(() {}),
                   decoration: const InputDecoration(
                     labelText: 'Модель',
-                    hintText: 'gpt-4o-mini',
                     border: OutlineInputBorder(),
                   ),
                 ),
@@ -218,7 +287,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           if (_availableModels.isNotEmpty) ...[
             const SizedBox(height: 10),
             const Text(
-              'Быстрый выбор модели:',
+              'Доступные модели:',
               style: TextStyle(fontSize: 12, color: Colors.grey),
             ),
             const SizedBox(height: 6),
@@ -244,7 +313,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             controller: _langCtrl,
             decoration: const InputDecoration(
               labelText: 'Язык перевода',
-              hintText: 'русский',
               border: OutlineInputBorder(),
             ),
           ),
