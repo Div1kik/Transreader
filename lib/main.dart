@@ -13,21 +13,49 @@ import 'services/translator_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const BookTranslatorApp());
+  runApp(const TransReaderApp());
 }
 
-class BookTranslatorApp extends StatelessWidget {
-  const BookTranslatorApp({super.key});
+class TransReaderApp extends StatelessWidget {
+  const TransReaderApp({super.key});
 
   @override
   Widget build(BuildContext context) {
+    const warmAccent = Color(0xFFD98A3C); // уютный тёплый янтарный
+    const warmBg = Color(0xFF191613); // глубокий тёплый кофейно-графитовый
+    const warmCard = Color(0xFF241F1B); // мягкий тёплый фон карточек
+
     return MaterialApp(
-      title: 'Book Translator',
+      title: 'TransReader',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: warmBg,
         colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.teal,
+          seedColor: warmAccent,
+          primary: warmAccent,
+          secondary: const Color(0xFFE5A967),
+          surface: warmCard,
           brightness: Brightness.dark,
+        ),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Color(0xFF211C18),
+          foregroundColor: Color(0xFFF3ECE4),
+          elevation: 0,
+        ),
+        cardTheme: CardThemeData(
+          color: warmCard,
+          elevation: 1,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: BorderSide(
+              color: const Color(0xFFE5A967).withOpacity(0.12),
+            ),
+          ),
+        ),
+        floatingActionButtonTheme: const FloatingActionButtonThemeData(
+          backgroundColor: warmAccent,
+          foregroundColor: Color(0xFF191613),
         ),
         useMaterial3: true,
       ),
@@ -209,9 +237,20 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Библиотека книг'),
+        title: Row(
+          children: [
+            Icon(Icons.auto_stories, color: accent, size: 22),
+            const SizedBox(width: 8),
+            const Text(
+              'TransReader',
+              style: TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ],
+        ),
         actions: [
           IconButton(
             icon: const Icon(Icons.settings),
@@ -226,10 +265,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
             ? const SizedBox(
                 width: 18,
                 height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Color(0xFF191613),
+                ),
               )
             : const Icon(Icons.add),
-        label: Text(_importing ? 'Загрузка...' : 'Добавить книгу'),
+        label: Text(
+          _importing ? 'Загрузка...' : 'Добавить книгу',
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
       ),
       body: Column(
         children: [
@@ -238,19 +283,32 @@ class _LibraryScreenState extends State<LibraryScreen> {
             initialData: _queueController.currentProgress,
             builder: (context, snapshot) {
               final p = snapshot.data ?? const TranslationProgress();
-              if (!p.isRunning && !p.isPausedOffline && p.rateLimitWaitSeconds <= 0) {
+              if (!p.isRunning &&
+                  !p.isPausedOffline &&
+                  p.rateLimitWaitSeconds <= 0) {
                 return const SizedBox.shrink();
               }
               return Container(
                 width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF2B241E),
+                  border: Border(
+                    bottom: BorderSide(
+                      color: accent.withOpacity(0.25),
+                    ),
+                  ),
+                ),
                 child: Row(
                   children: [
-                    const SizedBox(
+                    SizedBox(
                       width: 16,
                       height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: accent,
+                      ),
                     ),
                     const SizedBox(width: 10),
                     Expanded(
@@ -260,7 +318,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                             : 'Переводится «${p.activeBookTitle}» — гл. ${p.currentChapter} (${p.translatedParagraphsInChapter}/${p.totalParagraphsInChapter})',
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 12),
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFFF3ECE4),
+                        ),
                       ),
                     ),
                     TextButton(
@@ -274,7 +335,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           ),
           Expanded(
             child: _loading
-                ? const Center(child: CircularProgressIndicator())
+                ? Center(child: CircularProgressIndicator(color: accent))
                 : _books.isEmpty
                     ? Center(
                         child: Padding(
@@ -282,42 +343,72 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              const Icon(Icons.menu_book, size: 64, color: Colors.teal),
-                              const SizedBox(height: 12),
+                              Icon(Icons.menu_book, size: 68, color: accent),
+                              const SizedBox(height: 14),
                               const Text(
-                                'Пока нет загруженных книг',
-                                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                                'Ваша библиотека пуста',
+                                style: TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFFF3ECE4),
+                                ),
                               ),
                               const SizedBox(height: 6),
-                              Text(
-                                'Нажми «Добавить книгу», чтобы выбрать файл .txt или .fb2',
+                              const Text(
+                                'Нажмите «Добавить книгу», чтобы открыть файл .txt или .fb2',
                                 textAlign: TextAlign.center,
-                                style: TextStyle(color: Colors.grey.shade400),
+                                style: TextStyle(color: Color(0xFFA89E93)),
                               ),
                             ],
                           ),
                         ),
                       )
                     : ListView.separated(
-                        padding: const EdgeInsets.all(12),
+                        padding: const EdgeInsets.fromLTRB(12, 12, 12, 84),
                         itemCount: _books.length,
                         separatorBuilder: (_, __) => const SizedBox(height: 8),
                         itemBuilder: (context, index) {
                           final book = _books[index];
                           return Card(
                             child: ListTile(
-                              leading: const Icon(Icons.book, color: Colors.teal),
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 6,
+                              ),
+                              leading: Container(
+                                width: 42,
+                                height: 42,
+                                decoration: BoxDecoration(
+                                  color: accent.withOpacity(0.15),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Icon(Icons.book, color: accent),
+                              ),
                               title: Text(
                                 book.title,
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFFF3ECE4),
+                                ),
                               ),
-                              subtitle: Text(
-                                'Формат: ${book.format.toUpperCase()} • Глав: ${book.totalChapters}',
+                              subtitle: Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Text(
+                                  'Формат: ${book.format.toUpperCase()} • Глав: ${book.totalChapters}',
+                                  style: const TextStyle(
+                                    color: Color(0xFFA89E93),
+                                    fontSize: 12,
+                                  ),
+                                ),
                               ),
                               onTap: () => _openBook(book),
                               trailing: IconButton(
-                                icon: const Icon(Icons.delete_outline),
+                                icon: const Icon(
+                                  Icons.delete_outline,
+                                  color: Color(0xFFA89E93),
+                                ),
                                 onPressed: () => _deleteBook(book),
                               ),
                             ),
