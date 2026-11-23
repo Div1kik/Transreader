@@ -50,9 +50,8 @@ class _BookPageViewState extends State<BookPageView>
   Size? _lastSize;
   String? _lastLayoutSignature;
 
-  // Для 3D-анимации перелистывания книги
   late final AnimationController _curlController;
-  double _dragProgress = 0.0; // -1.0 (листаем назад) .. 0.0 .. +1.0 (листаем вперёд)
+  double _dragProgress = 0.0; // -1.0 (назад) .. 0.0 .. +1.0 (вперёд)
   bool _isDragging = false;
 
   @override
@@ -61,7 +60,10 @@ class _BookPageViewState extends State<BookPageView>
     _currentPage = widget.initialPage;
     _curlController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 360),
+      duration: const Duration(milliseconds: 380),
+      lowerBound: -1.0,
+      upperBound: 1.0,
+      value: 0.0,
     )..addListener(() {
         setState(() {
           _dragProgress = _curlController.value;
@@ -123,7 +125,8 @@ class _BookPageViewState extends State<BookPageView>
     var currentItems = <ParagraphItem>[];
     String? pendingHeader = widget.chapterTitle;
 
-    double usedHeight = measureTextHeight(widget.chapterTitle, headerStyle) + 18.0;
+    double usedHeight =
+        measureTextHeight(widget.chapterTitle, headerStyle) + 18.0;
 
     for (final p in widget.paragraphs) {
       final textToShow = p.isTranslated ? p.translatedText! : p.sourceText;
@@ -133,10 +136,11 @@ class _BookPageViewState extends State<BookPageView>
         itemHeight += measureTextHeight(p.sourceText, origStyle) + 6.0;
       }
       if (!p.isTranslated) {
-        itemHeight += 28.0; // место под компактную кнопку «Перевести»
+        itemHeight += 28.0;
       }
 
-      if (usedHeight + itemHeight > availableHeight && currentItems.isNotEmpty) {
+      if (usedHeight + itemHeight > availableHeight &&
+          currentItems.isNotEmpty) {
         result.add(
           BookPageSlice(
             chapterHeader: pendingHeader,
@@ -176,6 +180,7 @@ class _BookPageViewState extends State<BookPageView>
     setState(() {
       _currentPage = target;
       _dragProgress = 0.0;
+      _curlController.value = 0.0;
     });
     widget.onPageChanged?.call(_currentPage);
   }
@@ -184,14 +189,17 @@ class _BookPageViewState extends State<BookPageView>
     _curlController.value = _dragProgress;
     await _curlController.animateTo(
       endValue,
-      duration: const Duration(milliseconds: 300),
+      duration: const Duration(milliseconds: 340),
       curve: Curves.easeOutCubic,
     );
     if (!mounted) return;
     if (nextPageIndex != null) {
       _goToPage(nextPageIndex);
     } else {
-      setState(() => _dragProgress = 0.0);
+      setState(() {
+        _dragProgress = 0.0;
+        _curlController.value = 0.0;
+      });
     }
   }
 
@@ -356,22 +364,103 @@ class _BookPageViewState extends State<BookPageView>
     );
   }
 
+  /// Естественное перелистывание страницы книги:
+  /// лист приподнимается на читателя (вперёд по Z и лёгкий scale),
+  /// перегибается вдоль корешка в сторону с мягкой тенью и обратной стороной листа.
+  Widget _buildTurningSheet({
+    required Widget pageWidget,
+    required double progress, // 0.0 (лежит плоско) -> 1.0 (перевёрнута влево)
+    required double width,
+  }) {
+    final t = progress.clamp(0.0, 1.0);
+    // Угол поворота до ~105 градусов, чтобы лист уходил за левый край экрана
+    final angle = t * (math.pi * 0.58);
+    // Лёгкий подъём листа "на себя" в середине движения
+    final lift = math.sin(t * math.pi);
+    final scale = 1.0 + 0.035 * lift;
+    // Плавный увод корешка влево при завершении переворота
+    final slideX = -width * 0.18 * math.pow(t, 1.6);
+
+    final isBackSide = angle > (math.pi / 2);
+
+    final matrix = Matrix4.identity()
+      ..setEntry(3, 2, 0.00065) // мягкая, неискажающая перспектива
+      ..translate(slideX, 0.0, 0.0)
+      ..scale(scale, scale, 1.0)
+      ..rotateY(angle);
+
+    return Transform(
+      alignment: Alignment.centerLeft,
+      transform: matrix,
+      child: Container(
+        decoration: BoxDecoration(
+          boxShadow: [
+            if (t > 0.01)
+              BoxShadow(
+                color: Colors.black.withOpacity(0.28 * lift + 0.12 * t),
+                blurRadius: 18 * lift + 6,
+                offset: Offset(8 * (1 - t), 4 * lift),
+              ),
+          ],
+        ),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (!isBackSide)
+              pageWidget
+            else
+              // Обратная сторона бумажного листа с лёгким просвечиванием текста
+              Container(
+                color: widget.palette.background,
+                child: Opacity(
+                  opacity: 0.14,
+                  child: Transform(
+                    alignment: Alignment.center,
+                    transform: Matrix4.identity()..scale(-1.0, 1.0, 1.0),
+                    child: pageWidget,
+                  ),
+                ),
+              ),
+            // Светотень изгиба бумажного листа
+            if (t > 0.01)
+              IgnorePointer(
+                child: Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.centerLeft,
+                      end: Alignment.centerRight,
+                      stops: const [0.0, 0.12, 0.78, 0.94, 1.0],
+                      colors: [
+                        Colors.black.withOpacity(0.22 * t),
+                        Colors.white.withOpacity(0.10 * lift),
+                        Colors.transparent,
+                        Colors.white.withOpacity(0.16 * lift),
+                        Colors.black.withOpacity(0.26 * t),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildCurlStage(double width) {
-    // _dragProgress > 0: листаем вперёд (текущая страница уходит влево, под ней следующая)
-    // _dragProgress < 0: листаем назад (предыдущая страница накрывает текущую слева направо)
     if (_dragProgress >= 0) {
       final hasNext = _currentPage + 1 < _pages.length;
       final t = _dragProgress.clamp(0.0, 1.0);
-      final angle = -t * (math.pi / 2.1);
 
       return Stack(
         fit: StackFit.expand,
         children: [
+          // Нижняя страница (следующая)
           if (hasNext)
             _buildSinglePageContent(_currentPage + 1)
           else
             _buildSinglePageContent(_currentPage),
-          // Тень от перелистываемой страницы на нижней странице
+          // Скользящая тень от верхнего листа на открывающуюся страницу
           if (t > 0.01 && hasNext)
             IgnorePointer(
               child: Container(
@@ -379,91 +468,49 @@ class _BookPageViewState extends State<BookPageView>
                   gradient: LinearGradient(
                     begin: Alignment.centerLeft,
                     end: Alignment.centerRight,
+                    stops: [
+                      0.0,
+                      (1.0 - t * 0.85).clamp(0.05, 0.95),
+                      1.0,
+                    ],
                     colors: [
-                      Colors.black.withOpacity(0.32 * (1 - t)),
+                      Colors.black.withOpacity(0.30 * (1.0 - t * 0.7)),
+                      Colors.black.withOpacity(0.06 * (1.0 - t)),
                       Colors.transparent,
                     ],
                   ),
                 ),
               ),
             ),
-          // Верхняя перелистываемая страница с 3D-перспективой
-          Transform(
-            alignment: Alignment.centerLeft,
-            transform: Matrix4.identity()
-              ..setEntry(3, 2, 0.0012)
-              ..rotateY(angle),
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                _buildSinglePageContent(_currentPage),
-                // Блик и тень изгиба бумажного листа
-                if (t > 0.01)
-                  IgnorePointer(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.centerLeft,
-                          end: Alignment.centerRight,
-                          stops: const [0.0, 0.82, 0.94, 1.0],
-                          colors: [
-                            Colors.black.withOpacity(0.18 * t),
-                            Colors.transparent,
-                            Colors.white.withOpacity(0.14 * t),
-                            Colors.black.withOpacity(0.35 * t),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
+          // Верхний перелистываемый лист (текущая страница)
+          _buildTurningSheet(
+            pageWidget: _buildSinglePageContent(_currentPage),
+            progress: t,
+            width: width,
           ),
         ],
       );
     } else {
       final hasPrev = _currentPage - 1 >= 0;
       final t = (-_dragProgress).clamp(0.0, 1.0);
-      final angle = -(1.0 - t) * (math.pi / 2.1);
 
       return Stack(
         fit: StackFit.expand,
         children: [
+          // Текущая страница остаётся снизу
           _buildSinglePageContent(_currentPage),
           if (t > 0.01 && hasPrev)
             IgnorePointer(
               child: Container(
-                color: Colors.black.withOpacity(0.25 * t),
+                color: Colors.black.withOpacity(0.22 * (1.0 - t)),
               ),
             ),
+          // Предыдущая страница возвращается справа налево на место (progress: 1.0 -> 0.0)
           if (hasPrev)
-            Transform(
-              alignment: Alignment.centerLeft,
-              transform: Matrix4.identity()
-                ..setEntry(3, 2, 0.0012)
-                ..rotateY(angle),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  _buildSinglePageContent(_currentPage - 1),
-                  IgnorePointer(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.centerLeft,
-                          end: Alignment.centerRight,
-                          stops: const [0.0, 0.85, 1.0],
-                          colors: [
-                            Colors.black.withOpacity(0.2 * (1 - t)),
-                            Colors.transparent,
-                            Colors.black.withOpacity(0.35 * (1 - t)),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
+            _buildTurningSheet(
+              pageWidget: _buildSinglePageContent(_currentPage - 1),
+              progress: 1.0 - t,
+              width: width,
             ),
         ],
       );
@@ -509,7 +556,7 @@ class _BookPageViewState extends State<BookPageView>
             if (!_isDragging) return;
             final delta = -(details.primaryDelta ?? 0) / size.width;
             setState(() {
-              _dragProgress = (_dragProgress + delta * 1.35).clamp(-1.0, 1.0);
+              _dragProgress = (_dragProgress + delta * 1.25).clamp(-1.0, 1.0);
             });
           },
           onHorizontalDragEnd: (details) {
@@ -517,7 +564,7 @@ class _BookPageViewState extends State<BookPageView>
             _isDragging = false;
             final velocity = details.primaryVelocity ?? 0;
 
-            if (_dragProgress > 0.22 || velocity < -450) {
+            if (_dragProgress > 0.20 || velocity < -420) {
               if (_currentPage + 1 < _pages.length) {
                 if (isCurl) {
                   _animateCurlTo(1.0, _currentPage + 1);
@@ -528,7 +575,7 @@ class _BookPageViewState extends State<BookPageView>
                 setState(() => _dragProgress = 0.0);
                 widget.onNextChapter?.call();
               }
-            } else if (_dragProgress < -0.22 || velocity > 450) {
+            } else if (_dragProgress < -0.20 || velocity > 420) {
               if (_currentPage - 1 >= 0) {
                 if (isCurl) {
                   _animateCurlTo(-1.0, _currentPage - 1);
@@ -547,18 +594,20 @@ class _BookPageViewState extends State<BookPageView>
               }
             }
           },
-          child: isCurl
-              ? _buildCurlStage(size.width)
-              : AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 220),
-                  transitionBuilder: (child, anim) {
-                    return FadeTransition(opacity: anim, child: child);
-                  },
-                  child: KeyedSubtree(
-                    key: ValueKey('slide_page_$_currentPage'),
-                    child: _buildSinglePageContent(_currentPage),
+          child: ClipRect(
+            child: isCurl
+                ? _buildCurlStage(size.width)
+                : AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 220),
+                    transitionBuilder: (child, anim) {
+                      return FadeTransition(opacity: anim, child: child);
+                    },
+                    child: KeyedSubtree(
+                      key: ValueKey('slide_page_$_currentPage'),
+                      child: _buildSinglePageContent(_currentPage),
+                    ),
                   ),
-                ),
+          ),
         );
       },
     );
