@@ -27,7 +27,15 @@ jobs:
           cache: true
 
       - name: Generate Android project files
+        run: flutter create . 
+      - name: Generate Android project files
         run: flutter create . --platforms=android
+
+      - name: Add INTERNET permission to AndroidManifest
+        run: |
+          sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <application/' android/app/src/main/AndroidManifest.xml
+
+--platforms=android
 
       - name: Install dependencies
         run: flutter pub get
