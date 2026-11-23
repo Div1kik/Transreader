@@ -158,14 +158,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _importBook() async {
     try {
       final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['txt', 'fb2'],
+        type: FileType.any,
         withData: true,
       );
       if (result == null || result.files.isEmpty) return;
 
-      setState(() => _importing = true);
       final file = result.files.first;
+      final lowerName = file.name.toLowerCase();
+      if (!lowerName.endsWith('.txt') && !lowerName.endsWith('.fb2')) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Выберите файл формата .txt или .fb2'),
+          ),
+        );
+        return;
+      }
+
+      setState(() => _importing = true);
       final bytes = file.bytes ??
           (file.path != null ? await File(file.path!).readAsBytes() : null);
 
