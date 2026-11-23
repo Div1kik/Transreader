@@ -35,9 +35,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
   void initState() {
     super.initState();
     _initData();
-    _progressSub = widget.queueController.progressStream.listen((_) {
-      _refreshCurrentChapter(silent: true);
-      _refreshChaptersList();
+    _progressSub = widget.queueController.progressStream.listen((p) {
+      if (p.activeBookId == widget.book.id) {
+        _refreshCurrentChapter(silent: true);
+        _refreshChaptersList();
+      }
     });
   }
 
@@ -87,6 +89,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   void _startQueue({TranslateMode? overrideMode, int? overrideAhead}) {
     widget.queueController.startTranslation(
       bookId: widget.book.id,
+      bookTitle: widget.book.title,
       currentReadingChapter: _currentChapterIndex,
       mode: overrideMode ?? _selectedMode,
       chaptersAhead: overrideAhead ?? _chaptersAhead,
@@ -119,8 +122,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
   @override
   void dispose() {
     _progressSub?.cancel();
-    widget.queueController.stop();
-    widget.queueController.dispose();
     super.dispose();
   }
 
@@ -148,9 +149,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
         children: [
           StreamBuilder<TranslationProgress>(
             stream: widget.queueController.progressStream,
-            initialData: const TranslationProgress(),
+            initialData: widget.queueController.currentProgress,
             builder: (context, snapshot) {
               final p = snapshot.data ?? const TranslationProgress();
+              final isThisBook =
+                  p.activeBookId.isEmpty || p.activeBookId == widget.book.id;
               final modelBadge =
                   p.activeModel.isNotEmpty ? ' • ${p.activeModel}' : '';
 
@@ -228,14 +231,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
                       Padding(
                         padding: const EdgeInsets.only(top: 6),
                         child: Text(
-                          p.isPausedOffline
-                              ? 'Нет сети — перевод на паузе. Ждём подключение...'
-                              : p.rateLimitWaitSeconds > 0
-                                  ? 'Все выбранные модели в лимите — ждём квоту: ${_formatWaitTime(p.rateLimitWaitSeconds)}...'
-                                  : p.errorMessage != null
-                                      ? 'Ошибка: ${p.errorMessage}'
-                                      : 'Глава ${p.currentChapter} (в очереди ${p.totalChaptersInJob})$modelBadge: '
-                                          'абзацев ${p.translatedParagraphsInChapter}/${p.totalParagraphsInChapter}',
+                          !isThisBook && p.isRunning
+                              ? 'В фоне переводится «${p.activeBookTitle}» — глава ${p.currentChapter}...'
+                              : p.isPausedOffline
+                                  ? 'Нет сети — перевод на паузе. Ждём подключение...'
+                                  : p.rateLimitWaitSeconds > 0
+                                      ? 'Все модели в лимите — ждём квоту: ${_formatWaitTime(p.rateLimitWaitSeconds)}...'
+                                      : p.errorMessage != null
+                                          ? 'Ошибка: ${p.errorMessage}'
+                                          : 'Глава ${p.currentChapter} (в очереди ${p.totalChaptersInJob})$modelBadge: '
+                                              'абзацев ${p.translatedParagraphsInChapter}/${p.totalParagraphsInChapter}',
                           style: TextStyle(
                             fontSize: 12,
                             color: p.errorMessage != null
