@@ -46,6 +46,7 @@ class LibraryScreen extends StatefulWidget {
 class _LibraryScreenState extends State<LibraryScreen> {
   final SettingsService _settingsService = SettingsService();
   TranslatorSettings _settings = const TranslatorSettings();
+  late final TranslationQueueController _queueController;
   List<Book> _books = [];
   bool _loading = true;
   bool _importing = false;
@@ -53,13 +54,25 @@ class _LibraryScreenState extends State<LibraryScreen> {
   @override
   void initState() {
     super.initState();
+    _queueController = TranslationQueueController(
+      db: BookDatabase.instance,
+      translator: TranslatorService(settings: _settings),
+    );
     _initAll();
+  }
+
+  @override
+  void dispose() {
+    _queueController.stop();
+    _queueController.dispose();
+    super.dispose();
   }
 
   Future<void> _initAll() async {
     final loadedSettings = await _settingsService.loadSettings();
     final loadedBooks = await BookDatabase.instance.getBooks();
     if (!mounted) return;
+    _queueController.updateSettings(loadedSettings);
     setState(() {
       _settings = loadedSettings;
       _books = loadedBooks;
@@ -166,23 +179,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ),
     );
     if (updated != null && mounted) {
+      _queueController.updateSettings(updated);
       setState(() => _settings = updated);
     }
   }
 
   void _openBook(Book book) {
-    final translator = TranslatorService(settings: _settings);
-    final queueController = TranslationQueueController(
-      db: BookDatabase.instance,
-      translator: translator,
-    );
-
     Navigator.of(context)
         .push(
           MaterialPageRoute(
             builder: (_) => ReaderScreen(
               book: book,
-              queueController: queueController,
+              queueController: _queueController,
               targetLanguage: _settings.targetLanguage,
             ),
           ),
@@ -191,6 +199,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _deleteBook(Book book) async {
+    if (_queueController.currentProgress.isRunning &&
+        _queueController.currentProgress.activeBookId == book.id) {
+      _queueController.stop();
+    }
     await BookDatabase.instance.deleteBook(book.id);
     await _reloadBooks();
   }
@@ -219,57 +231,102 @@ class _LibraryScreenState extends State<LibraryScreen> {
             : const Icon(Icons.add),
         label: Text(_importing ? 'Загрузка...' : 'Добавить книгу'),
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _books.isEmpty
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.menu_book, size: 64, color: Colors.teal),
-                        const SizedBox(height: 12),
-                        const Text(
-                          'Пока нет загруженных книг',
-                          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          'Нажми «Добавить книгу», чтобы выбрать файл .txt или .fb2',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.grey.shade400),
-                        ),
-                      ],
+      body: Column(
+        children: [
+          StreamBuilder<TranslationProgress>(
+            stream: _queueController.progressStream,
+            initialData: _queueController.currentProgress,
+            builder: (context, snapshot) {
+              final p = snapshot.data ?? const TranslationProgress();
+              if (!p.isRunning && !p.isPausedOffline && p.rateLimitWaitSeconds <= 0) {
+                return const SizedBox.shrink();
+              }
+              return Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                child: Row(
+                  children: [
+                    const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
                     ),
-                  ),
-                )
-              : ListView.separated(
-                  padding: const EdgeInsets.all(12),
-                  itemCount: _books.length,
-                  separatorBuilder: (_, __) => const SizedBox(height: 8),
-                  itemBuilder: (context, index) {
-                    final book = _books[index];
-                    return Card(
-                      child: ListTile(
-                        leading: const Icon(Icons.book, color: Colors.teal),
-                        title: Text(
-                          book.title,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        subtitle: Text(
-                          'Формат: ${book.format.toUpperCase()} • Глав: ${book.totalChapters}',
-                        ),
-                        onTap: () => _openBook(book),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete_outline),
-                          onPressed: () => _deleteBook(book),
-                        ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        p.rateLimitWaitSeconds > 0
+                            ? 'Фоновый перевод «${p.activeBookTitle}»: ждём квоту ${p.rateLimitWaitSeconds} сек...'
+                            : 'Переводится «${p.activeBookTitle}» — гл. ${p.currentChapter} (${p.translatedParagraphsInChapter}/${p.totalParagraphsInChapter})',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 12),
                       ),
-                    );
-                  },
+                    ),
+                    TextButton(
+                      onPressed: _queueController.stop,
+                      child: const Text('Стоп'),
+                    ),
+                  ],
                 ),
+              );
+            },
+          ),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _books.isEmpty
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.menu_book, size: 64, color: Colors.teal),
+                              const SizedBox(height: 12),
+                              const Text(
+                                'Пока нет загруженных книг',
+                                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                'Нажми «Добавить книгу», чтобы выбрать файл .txt или .fb2',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(color: Colors.grey.shade400),
+                              ),
+                            ],
+                          ),
+                        ),
+                      )
+                    : ListView.separated(
+                        padding: const EdgeInsets.all(12),
+                        itemCount: _books.length,
+                        separatorBuilder: (_, __) => const SizedBox(height: 8),
+                        itemBuilder: (context, index) {
+                          final book = _books[index];
+                          return Card(
+                            child: ListTile(
+                              leading: const Icon(Icons.book, color: Colors.teal),
+                              title: Text(
+                                book.title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              subtitle: Text(
+                                'Формат: ${book.format.toUpperCase()} • Глав: ${book.totalChapters}',
+                              ),
+                              onTap: () => _openBook(book),
+                              trailing: IconButton(
+                                icon: const Icon(Icons.delete_outline),
+                                onPressed: () => _deleteBook(book),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+          ),
+        ],
+      ),
     );
   }
 }
