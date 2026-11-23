@@ -8,11 +8,13 @@ class _ProviderPreset {
   final String label;
   final String endpoint;
   final String defaultModel;
+  final List<String> defaultFallbacks;
 
   const _ProviderPreset({
     required this.label,
     required this.endpoint,
     required this.defaultModel,
+    this.defaultFallbacks = const [],
   });
 }
 
@@ -28,15 +30,16 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   static const List<_ProviderPreset> _presets = [
     _ProviderPreset(
+      label: 'Groq (Free)',
+      endpoint: 'https://api.groq.com/openai/v1/chat/completions',
+      defaultModel: 'openai/gpt-oss-120b',
+      defaultFallbacks: ['qwen/qwen3.8-27b', 'openai/gpt-oss-20b'],
+    ),
+    _ProviderPreset(
       label: 'Gemini (Free)',
       endpoint:
           'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
-      defaultModel: 'gemini-2.5-flash',
-    ),
-    _ProviderPreset(
-      label: 'Groq (Free)',
-      endpoint: 'https://api.groq.com/openai/v1/chat/completions',
-      defaultModel: 'llama-3.3-70b-versatile',
+      defaultModel: 'gemini-3.8-flash',
     ),
     _ProviderPreset(
       label: 'OpenRouter',
@@ -62,6 +65,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   bool _obscureKey = true;
   bool _loadingModels = false;
+  late bool _autoSwitchModels;
+  late List<String> _selectedModels;
   List<String> _availableModels = [];
   String? _modelsError;
 
@@ -74,10 +79,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _modelCtrl = TextEditingController(text: widget.initialSettings.model);
     _langCtrl =
         TextEditingController(text: widget.initialSettings.targetLanguage);
+    _autoSwitchModels = widget.initialSettings.autoSwitchModels;
 
-    if (widget.initialSettings.model.trim().isNotEmpty) {
-      _availableModels = [widget.initialSettings.model.trim()];
-    }
+    _selectedModels = List<String>.from(widget.initialSettings.activeModelChain);
+    _availableModels = List<String>.from(_selectedModels);
   }
 
   @override
@@ -93,8 +98,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {
       _endpointCtrl.text = preset.endpoint;
       _modelCtrl.text = preset.defaultModel;
-      _availableModels = [preset.defaultModel];
+      _selectedModels = [
+        preset.defaultModel,
+        ...preset.defaultFallbacks,
+      ];
+      _availableModels = List<String>.from(_selectedModels);
       _modelsError = null;
+    });
+  }
+
+  void _toggleModelSelection(String modelName) {
+    setState(() {
+      if (_autoSwitchModels) {
+        if (_selectedModels.contains(modelName)) {
+          if (_selectedModels.length > 1) {
+            _selectedModels.remove(modelName);
+          }
+        } else {
+          _selectedModels.add(modelName);
+        }
+        _modelCtrl.text = _selectedModels.first;
+      } else {
+        _selectedModels = [modelName];
+        _modelCtrl.text = modelName;
+      }
     });
   }
 
@@ -148,7 +175,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
       final decoded =
           jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-      final data = (decoded['data'] ?? decoded['models']) as List<dynamic>? ?? [];
+      final data =
+          (decoded['data'] ?? decoded['models']) as List<dynamic>? ?? [];
       final ids = data
           .map((item) {
             final map = item as Map<String, dynamic>;
@@ -160,9 +188,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           .toList()
         ..sort();
 
-      final currentModel = _modelCtrl.text.trim();
-      if (currentModel.isNotEmpty && !ids.contains(currentModel)) {
-        ids.insert(0, currentModel);
+      for (final selected in _selectedModels.reversed) {
+        if (selected.isNotEmpty && !ids.contains(selected)) {
+          ids.insert(0, selected);
+        }
       }
 
       if (!mounted) return;
@@ -185,14 +214,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _save() async {
+    final primary = _modelCtrl.text.trim().isEmpty
+        ? 'openai/gpt-oss-120b'
+        : _modelCtrl.text.trim();
+
+    final fallbacks = _selectedModels
+        .where((m) => m.trim().isNotEmpty && m.trim() != primary)
+        .toList();
+
     final updated = TranslatorSettings(
       endpointUrl: _endpointCtrl.text.trim().isEmpty
-          ? 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
+          ? 'https://api.groq.com/openai/v1/chat/completions'
           : _endpointCtrl.text.trim(),
       apiKey: _apiKeyCtrl.text.trim(),
-      model: _modelCtrl.text.trim().isEmpty
-          ? 'gemini-2.5-flash'
-          : _modelCtrl.text.trim(),
+      model: primary,
+      fallbackModels: fallbacks,
+      autoSwitchModels: _autoSwitchModels,
       targetLanguage: _langCtrl.text.trim().isEmpty
           ? 'русский'
           : _langCtrl.text.trim(),
@@ -204,8 +241,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final selectedModel = _modelCtrl.text.trim();
-
     return Scaffold(
       appBar: AppBar(title: const Text('Настройки переводчика')),
       body: ListView(
@@ -253,15 +288,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           const SizedBox(height: 12),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Автопереключение моделей при лимитах'),
+            subtitle: const Text(
+              'Если у одной модели закончится квота, очередь сама переключится на следующую отмеченную',
+              style: TextStyle(fontSize: 12),
+            ),
+            value: _autoSwitchModels,
+            onChanged: (val) {
+              setState(() {
+                _autoSwitchModels = val;
+                if (!val && _selectedModels.isNotEmpty) {
+                  _selectedModels = [_selectedModels.first];
+                  _modelCtrl.text = _selectedModels.first;
+                }
+              });
+            },
+          ),
+          const SizedBox(height: 8),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Expanded(
                 child: TextField(
                   controller: _modelCtrl,
-                  onChanged: (_) => setState(() {}),
+                  onChanged: (val) {
+                    final clean = val.trim();
+                    if (clean.isNotEmpty) {
+                      setState(() {
+                        if (_selectedModels.isEmpty) {
+                          _selectedModels = [clean];
+                        } else {
+                          _selectedModels[0] = clean;
+                        }
+                      });
+                    }
+                  },
                   decoration: const InputDecoration(
-                    labelText: 'Модель',
+                    labelText: 'Основная модель',
                     border: OutlineInputBorder(),
                   ),
                 ),
@@ -292,24 +357,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ],
           if (_availableModels.isNotEmpty) ...[
             const SizedBox(height: 10),
-            const Text(
-              'Доступные модели:',
-              style: TextStyle(fontSize: 12, color: Colors.grey),
+            Text(
+              _autoSwitchModels
+                  ? 'Выбери модели для ротации (${_selectedModels.length} в пуле):'
+                  : 'Выбери модель:',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
             const SizedBox(height: 6),
             Wrap(
               spacing: 8,
               runSpacing: 6,
               children: _availableModels.map((modelName) {
-                final isSelected = selectedModel == modelName;
-                return ChoiceChip(
-                  label: Text(modelName),
+                final idx = _selectedModels.indexOf(modelName);
+                final isSelected = idx != -1;
+                final label = isSelected && _autoSwitchModels
+                    ? '${idx + 1}. $modelName'
+                    : modelName;
+                return FilterChip(
+                  label: Text(label),
                   selected: isSelected,
-                  onSelected: (_) {
-                    setState(() {
-                      _modelCtrl.text = modelName;
-                    });
-                  },
+                  onSelected: (_) => _toggleModelSelection(modelName),
                 );
               }).toList(),
             ),
