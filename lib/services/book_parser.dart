@@ -20,10 +20,18 @@ class BookParser {
     required String rawContent,
   }) {
     final lower = fileName.toLowerCase();
-    if (lower.endsWith('.fb2')) {
-      return _parseFb2(bookId: bookId, fileName: fileName, xmlContent: rawContent);
+    if (lower.endsWith('.fb2') || rawContent.contains('<FictionBook')) {
+      return _parseFb2(
+        bookId: bookId,
+        fileName: fileName,
+        xmlContent: rawContent,
+      );
     }
-    return _parseTxt(bookId: bookId, fileName: fileName, textContent: rawContent);
+    return _parseTxt(
+      bookId: bookId,
+      fileName: fileName,
+      textContent: rawContent,
+    );
   }
 
   static ParsedBookData _parseFb2({
@@ -33,23 +41,35 @@ class BookParser {
   }) {
     final doc = XmlDocument.parse(xmlContent);
     final bookTitleEl = doc.findAllElements('book-title').firstOrNull;
+    final cleanFileName =
+        fileName.replaceAll(RegExp(r'\.fb2$', caseSensitive: false), '');
     final title = bookTitleEl?.innerText.trim().isNotEmpty == true
         ? bookTitleEl!.innerText.trim()
-        : fileName;
+        : cleanFileName;
 
     final body = doc.findAllElements('body').firstOrNull;
-    final sections = body?.findElements('section').toList() ?? [];
+    final allSections = body?.findAllElements('section').toList() ?? [];
+    final leafSections = allSections
+        .where((sec) => sec.findElements('section').isEmpty)
+        .toList();
+    final targetSections =
+        leafSections.isNotEmpty ? leafSections : allSections;
 
     final chapters = <Chapter>[];
     final paragraphs = <ParagraphItem>[];
 
     int chapterIdx = 0;
-    for (final sec in sections) {
-      final pElements = sec.findAllElements('p').toList();
+    for (final sec in targetSections) {
+      final pElements = sec.findElements('p').toList();
       if (pElements.isEmpty) continue;
 
-      final secTitle =
-          sec.findElements('title').firstOrNull?.innerText.trim() ?? '';
+      final secTitle = sec
+              .findElements('title')
+              .firstOrNull
+              ?.innerText
+              .replaceAll(RegExp(r'\s+'), ' ')
+              .trim() ??
+          '';
       final chapterTitle =
           secTitle.isNotEmpty ? secTitle : 'Глава ${chapterIdx + 1}';
 
@@ -102,7 +122,8 @@ class BookParser {
     required String fileName,
     required String textContent,
   }) {
-    final normalized = textContent.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+    final normalized =
+        textContent.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
     final rawBlocks = normalized
         .split(RegExp(r'\n\s*\n+'))
         .map((s) => s.replaceAll(RegExp(r'\s+'), ' ').trim())
@@ -145,7 +166,6 @@ class BookParser {
         currentChapterTitle = block;
       } else {
         currentChapterLines.add(block);
-        // Если в файле нет заголовков глав — режем условно по ~120 абзацев на главу
         if (currentChapterLines.length >= 120) {
           flushChapter();
           currentChapterTitle = 'Часть ${chapters.length + 1}';
