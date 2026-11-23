@@ -38,11 +38,11 @@ class ReaderPalette {
       case ReaderColorTheme.light:
         return const ReaderPalette(
           name: 'Светлая',
-          background: Color(0xFFFAFAFA),
-          surface: Color(0xFFEEEEEE),
-          text: Color(0xFF1C1C1E),
-          secondaryText: Color(0xFF6E6E73),
-          accent: Color(0xFF00796B),
+          background: Color(0xFFFAF8F5),
+          surface: Color(0xFFEFECE6),
+          text: Color(0xFF1F1C18),
+          secondaryText: Color(0xFF6E675F),
+          accent: Color(0xFFB86B24),
           brightness: Brightness.light,
         );
       case ReaderColorTheme.sepia:
@@ -58,21 +58,21 @@ class ReaderPalette {
       case ReaderColorTheme.dark:
         return const ReaderPalette(
           name: 'Тёмная',
-          background: Color(0xFF181A1B),
-          surface: Color(0xFF232628),
-          text: Color(0xFFE4E6EB),
-          secondaryText: Color(0xFF9AA0A6),
-          accent: Color(0xFF4DB6AC),
+          background: Color(0xFF191613),
+          surface: Color(0xFF241F1B),
+          text: Color(0xFFEAE3DA),
+          secondaryText: Color(0xFFA89E93),
+          accent: Color(0xFFD98A3C),
           brightness: Brightness.dark,
         );
       case ReaderColorTheme.amoled:
         return const ReaderPalette(
           name: 'AMOLED',
           background: Color(0xFF000000),
-          surface: Color(0xFF121212),
-          text: Color(0xFFD8D8D8),
-          secondaryText: Color(0xFF808080),
-          accent: Color(0xFF4DB6AC),
+          surface: Color(0xFF14110F),
+          text: Color(0xFFDCD5CC),
+          secondaryText: Color(0xFF8A8177),
+          accent: Color(0xFFD98A3C),
           brightness: Brightness.dark,
         );
     }
@@ -88,7 +88,7 @@ class ReaderAppearance {
 
   const ReaderAppearance({
     this.colorTheme = ReaderColorTheme.dark,
-    this.pageMode = ReaderPageMode.scroll,
+    this.pageMode = ReaderPageMode.pageCurl,
     this.fontSize = 18.0,
     this.lineHeight = 1.55,
     this.showOriginal = false,
@@ -112,11 +112,15 @@ class ReaderAppearance {
 
   static Future<ReaderAppearance> load() async {
     final prefs = await SharedPreferences.getInstance();
-    final themeIdx = prefs.getInt('reader_color_theme') ?? ReaderColorTheme.dark.index;
-    final modeIdx = prefs.getInt('reader_page_mode') ?? ReaderPageMode.scroll.index;
+    final themeIdx =
+        prefs.getInt('reader_color_theme') ?? ReaderColorTheme.dark.index;
+    final modeIdx =
+        prefs.getInt('reader_page_mode') ?? ReaderPageMode.pageCurl.index;
     return ReaderAppearance(
-      colorTheme: ReaderColorTheme.values[themeIdx.clamp(0, ReaderColorTheme.values.length - 1)],
-      pageMode: ReaderPageMode.values[modeIdx.clamp(0, ReaderPageMode.values.length - 1)],
+      colorTheme: ReaderColorTheme
+          .values[themeIdx.clamp(0, ReaderColorTheme.values.length - 1)],
+      pageMode: ReaderPageMode
+          .values[modeIdx.clamp(0, ReaderPageMode.values.length - 1)],
       fontSize: prefs.getDouble('reader_font_size') ?? 18.0,
       lineHeight: prefs.getDouble('reader_line_height') ?? 1.55,
       showOriginal: prefs.getBool('reader_show_original') ?? false,
