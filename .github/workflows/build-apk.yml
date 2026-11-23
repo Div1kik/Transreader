@@ -2,7 +2,7 @@ name: Build Flutter APK
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Java
@@ -26,16 +26,29 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Generate Android project files
-        run: flutter create . --platforms=android
-
-      - name: Configure AndroidManifest
-        run: |
-          sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <application/' android/app/src/main/AndroidManifest.xml
-          sed -i 's/<\/application>/    <meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false" \/>\n    <\/application>/' android/app/src/main/AndroidManifest.xml
-
       - name: Install dependencies
         run: flutter pub get
+
+      - name: Set app name to TransReader
+        run: |
+          if [ -f android/app/src/main/AndroidManifest.xml ]; then
+            sed -i 's/android:label="[^"]*"/android:label="TransReader"/g' android/app/src/main/AndroidManifest.xml
+          fi
+
+      - name: Generate TransReader app icon
+        run: |
+          if [ -f assets/icon.png ]; then
+            flutter pub add --dev flutter_launcher_icons
+            cat << 'EOF' > flutter_launcher_icons.yaml
+          flutter_launcher_icons:
+            android: true
+            ios: false
+            image_path: "assets/icon.png"
+            adaptive_icon_background: "#2A1B12"
+            adaptive_icon_foreground: "assets/icon.png"
+          EOF
+            dart run flutter_launcher_icons
+          fi
 
       - name: Build release APK
         run: flutter build apk --release
@@ -43,5 +56,5 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: book-translator-apk
+          name: TransReader-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
