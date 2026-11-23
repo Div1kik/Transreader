@@ -56,8 +56,10 @@ class OpenAiCompatibleTranslator implements TranslatorService {
     );
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('Ошибка API переводчика: ${response.statusCode}');
-    }
+  final errBody = utf8.decode(response.bodyBytes);
+  throw Exception('API ${response.statusCode}: $errBody');
+}
+
 
     final decoded = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
     final content = decoded['choices'][0]['message']['content'] as String;
