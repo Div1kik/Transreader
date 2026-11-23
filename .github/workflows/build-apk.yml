@@ -26,13 +26,23 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Create Android platform files
+        run: flutter create . --platforms=android --project-name transreader
+
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Set app name to TransReader
+      - name: Configure AndroidManifest (Name, Internet, Impeller)
         run: |
-          if [ -f android/app/src/main/AndroidManifest.xml ]; then
-            sed -i 's/android:label="[^"]*"/android:label="TransReader"/g' android/app/src/main/AndroidManifest.xml
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ]; then
+            sed -i 's/android:label="[^"]*"/android:label="TransReader"/g' "$MANIFEST"
+            if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
+              sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$MANIFEST"
+            fi
+            if ! grep -q "EnableImpeller" "$MANIFEST"; then
+              sed -i 's|</application>|    <meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false" />\n    </application>|' "$MANIFEST"
+            fi
           fi
 
       - name: Generate TransReader app icon
