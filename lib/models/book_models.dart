@@ -57,12 +57,30 @@ class TranslatorSettings {
   final String endpointUrl;
   final String apiKey;
   final String model;
+  final List<String> fallbackModels;
+  final bool autoSwitchModels;
   final String targetLanguage;
 
   const TranslatorSettings({
-    this.endpointUrl = 'https://api.openai.com/v1/chat/completions',
+    this.endpointUrl = 'https://api.groq.com/openai/v1/chat/completions',
     this.apiKey = '',
-    this.model = 'gpt-4o-mini',
+    this.model = 'openai/gpt-oss-120b',
+    this.fallbackModels = const ['qwen/qwen3.8-27b', 'openai/gpt-oss-20b'],
+    this.autoSwitchModels = true,
     this.targetLanguage = 'русский',
   });
+
+  List<String> get activeModelChain {
+    final list = <String>[];
+    if (model.trim().isNotEmpty) list.add(model.trim());
+    if (autoSwitchModels) {
+      for (final m in fallbackModels) {
+        final clean = m.trim();
+        if (clean.isNotEmpty && !list.contains(clean)) {
+          list.add(clean);
+        }
+      }
+    }
+    return list;
+  }
 }
