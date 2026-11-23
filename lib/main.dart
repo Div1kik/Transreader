@@ -58,7 +58,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _initAll() async {
     final loadedSettings = await _settingsService.loadSettings();
-    final loadedBooks = await BookDatabase.instance.getAllBooks();
+    final loadedBooks = await BookDatabase.instance.getBooks();
     if (!mounted) return;
     setState(() {
       _settings = loadedSettings;
@@ -68,7 +68,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _reloadBooks() async {
-    final loadedBooks = await BookDatabase.instance.getAllBooks();
+    final loadedBooks = await BookDatabase.instance.getBooks();
     if (!mounted) return;
     setState(() => _books = loadedBooks);
   }
@@ -82,7 +82,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   String _decodeWindows1251(List<int> bytes) {
-    const cp1251Extra = <int, int>{
+    const cp1251Extra = {
       0x80: 0x0402, 0x81: 0x0403, 0x82: 0x201A, 0x83: 0x0453,
       0x84: 0x201E, 0x85: 0x2026, 0x86: 0x2020, 0x87: 0x2021,
       0x88: 0x20AC, 0x89: 0x2030, 0x8A: 0x0409, 0x8B: 0x2039,
@@ -125,7 +125,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
       setState(() => _importing = true);
       final file = result.files.first;
-      final ext = (file.extension ?? '').toLowerCase();
       final bytes = file.bytes ??
           (file.path != null ? await File(file.path!).readAsBytes() : null);
 
@@ -135,24 +134,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
       final rawContent = _decodeFileBytes(bytes);
       final bookId = DateTime.now().millisecondsSinceEpoch.toString();
-      final fallbackTitle = file.name.replaceAll(
-        RegExp(r'\.(txt|fb2)$', caseSensitive: false),
-        '',
+
+      final parsed = BookParser.parse(
+        bookId: bookId,
+        fileName: file.name,
+        rawContent: rawContent,
       );
 
-      final parsed = ext == 'fb2'
-          ? BookParser.parseFb2(
-              bookId: bookId,
-              xmlContent: rawContent,
-              fallbackTitle: fallbackTitle,
-            )
-          : BookParser.parseTxt(
-              bookId: bookId,
-              textContent: rawContent,
-              title: fallbackTitle,
-            );
-
-      await BookDatabase.instance.insertParsedBook(parsed);
+      await BookDatabase.instance.insertBookWithChapters(
+        parsed.book,
+        parsed.chapters,
+        parsed.paragraphs,
+      );
       await _reloadBooks();
     } catch (e) {
       if (!mounted) return;
