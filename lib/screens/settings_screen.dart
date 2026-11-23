@@ -28,11 +28,6 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   static const List<_ProviderPreset> _presets = [
     _ProviderPreset(
-      label: 'OpenAI',
-      endpoint: 'https://api.openai.com/v1/chat/completions',
-      defaultModel: 'gpt-4o-mini',
-    ),
-    _ProviderPreset(
       label: 'Gemini (Free)',
       endpoint:
           'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
@@ -47,6 +42,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       label: 'OpenRouter',
       endpoint: 'https://openrouter.ai/api/v1/chat/completions',
       defaultModel: 'google/gemma-2-9b-it:free',
+    ),
+    _ProviderPreset(
+      label: 'OpenAI',
+      endpoint: 'https://api.openai.com/v1/chat/completions',
+      defaultModel: 'gpt-4o-mini',
     ),
     _ProviderPreset(
       label: 'DeepSeek',
@@ -98,21 +98,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
-  Uri _buildModelsUri(String rawEndpoint) {
-    final parsed = Uri.parse(rawEndpoint.trim());
-    final segments = parsed.pathSegments
-        .where(
-          (s) =>
-              s.isNotEmpty &&
-              s != 'chat' &&
-              s != 'completions' &&
-              s != 'responses',
-        )
-        .toList();
+  Uri _buildModelsUri(String rawEndpoint, String apiKey) {
+    var clean = rawEndpoint.trim();
+    if (clean.endsWith('/')) {
+      clean = clean.substring(0, clean.length - 1);
+    }
+    if (clean.endsWith('/chat/completions')) {
+      clean = clean.substring(0, clean.length - '/chat/completions'.length);
+    } else if (clean.endsWith('/completions')) {
+      clean = clean.substring(0, clean.length - '/completions'.length);
+    }
 
-    return parsed.replace(
-      pathSegments: [...segments, 'models'],
-    );
+    final baseUri = Uri.parse('$clean/models');
+    if (baseUri.host.contains('googleapis.com') && apiKey.isNotEmpty) {
+      return baseUri.replace(
+        queryParameters: {...baseUri.queryParameters, 'key': apiKey},
+      );
+    }
+    return baseUri;
   }
 
   Future<void> _fetchModels() async {
@@ -130,7 +133,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
 
     try {
-      final modelsUri = _buildModelsUri(endpoint);
+      final modelsUri = _buildModelsUri(endpoint, apiKey);
       final response = await http.get(
         modelsUri,
         headers: {
@@ -139,14 +142,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw Exception('HTTP ${response.statusCode}');
+        final bodyPreview = utf8.decode(response.bodyBytes);
+        throw Exception('HTTP ${response.statusCode}: $bodyPreview');
       }
 
       final decoded =
           jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-      final data = decoded['data'] as List<dynamic>? ?? [];
+      final data = (decoded['data'] ?? decoded['models']) as List<dynamic>? ?? [];
       final ids = data
-          .map((item) => (item as Map<String, dynamic>)['id']?.toString() ?? '')
+          .map((item) {
+            final map = item as Map<String, dynamic>;
+            return (map['id'] ?? map['name'] ?? '').toString();
+          })
           .where((id) => id.isNotEmpty)
           .map((id) => id.startsWith('models/') ? id.substring(7) : id)
           .toSet()
@@ -168,8 +175,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _modelsError =
-            'Не удалось загрузить список ($e). Проверь ключ или впиши модель вручную.';
+        _modelsError = 'Ошибка загрузки ($e)';
       });
     } finally {
       if (mounted) {
@@ -181,11 +187,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _save() async {
     final updated = TranslatorSettings(
       endpointUrl: _endpointCtrl.text.trim().isEmpty
-          ? 'https://api.openai.com/v1/chat/completions'
+          ? 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
           : _endpointCtrl.text.trim(),
       apiKey: _apiKeyCtrl.text.trim(),
       model: _modelCtrl.text.trim().isEmpty
-          ? 'gpt-4o-mini'
+          ? 'gemini-2.5-flash'
           : _modelCtrl.text.trim(),
       targetLanguage: _langCtrl.text.trim().isEmpty
           ? 'русский'
