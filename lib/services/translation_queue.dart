@@ -5,6 +5,8 @@ import '../models/book_models.dart';
 import 'translator_service.dart';
 
 class TranslationProgress {
+  final String activeBookId;
+  final String activeBookTitle;
   final int currentChapter;
   final int totalChaptersInJob;
   final int translatedParagraphsInChapter;
@@ -16,6 +18,8 @@ class TranslationProgress {
   final String? errorMessage;
 
   const TranslationProgress({
+    this.activeBookId = '',
+    this.activeBookTitle = '',
     this.currentChapter = 0,
     this.totalChaptersInJob = 0,
     this.translatedParagraphsInChapter = 0,
@@ -28,6 +32,8 @@ class TranslationProgress {
   });
 
   TranslationProgress copyWith({
+    String? activeBookId,
+    String? activeBookTitle,
     int? currentChapter,
     int? totalChaptersInJob,
     int? translatedParagraphsInChapter,
@@ -40,6 +46,8 @@ class TranslationProgress {
     bool clearError = false,
   }) {
     return TranslationProgress(
+      activeBookId: activeBookId ?? this.activeBookId,
+      activeBookTitle: activeBookTitle ?? this.activeBookTitle,
       currentChapter: currentChapter ?? this.currentChapter,
       totalChaptersInJob: totalChaptersInJob ?? this.totalChaptersInJob,
       translatedParagraphsInChapter:
@@ -57,13 +65,15 @@ class TranslationProgress {
 
 class TranslationQueueController {
   final BookDatabase db;
-  final TranslatorService translator;
+  TranslatorService translator;
   final Connectivity connectivity = Connectivity();
 
   final _progressController = StreamController<TranslationProgress>.broadcast();
   Stream<TranslationProgress> get progressStream => _progressController.stream;
 
   TranslationProgress _progress = const TranslationProgress();
+  TranslationProgress get currentProgress => _progress;
+
   bool _cancelled = false;
   final Map<String, DateTime> _modelCooldownUntil = {};
 
@@ -71,6 +81,10 @@ class TranslationQueueController {
     required this.db,
     required this.translator,
   });
+
+  void updateSettings(TranslatorSettings newSettings) {
+    translator = TranslatorService(settings: newSettings);
+  }
 
   Future<bool> _hasNetwork() async {
     final results = await connectivity.checkConnectivity();
@@ -86,6 +100,21 @@ class TranslationQueueController {
         msg.contains('quota') ||
         msg.contains('model_not_found') ||
         msg.contains('503');
+  }
+
+  bool _isTransientError(Object error) {
+    final msg = error.toString().toLowerCase();
+    return error is FormatException ||
+        msg.contains('formatexception') ||
+        msg.contains('socketexception') ||
+        msg.contains('clientexception') ||
+        msg.contains('connection refused') ||
+        msg.contains('connection reset') ||
+        msg.contains('handshakeexception') ||
+        msg.contains('timed out') ||
+        msg.contains('api 500') ||
+        msg.contains('api 502') ||
+        msg.contains('api 504');
   }
 
   Duration _parseCooldownDuration(Object error) {
@@ -171,12 +200,18 @@ class TranslationQueueController {
 
   Future<void> startTranslation({
     required String bookId,
+    required String bookTitle,
     required int currentReadingChapter,
     required TranslateMode mode,
     int chaptersAhead = 3,
     int batchSize = 4,
     String targetLanguage = 'русский',
   }) async {
+    if (_progress.isRunning) {
+      stop();
+      await Future.delayed(const Duration(milliseconds: 250));
+    }
+
     _cancelled = false;
     final allChapters = await db.getChapters(bookId);
     if (allChapters.isEmpty) return;
@@ -192,6 +227,8 @@ class TranslationQueueController {
     final targetChapters = allChapters.sublist(startIdx, endIdx + 1);
 
     _progress = TranslationProgress(
+      activeBookId: bookId,
+      activeBookTitle: bookTitle,
       isRunning: true,
       totalChaptersInJob: targetChapters.length,
       activeModel: modelPool.first,
@@ -221,8 +258,19 @@ class TranslationQueueController {
         ChapterStatus.inProgress,
       );
 
+      // Берём последние 2 уже переведённых абзаца главы как начальный контекст
+      final recentContext = paragraphs
+          .where((p) => p.isTranslated)
+          .map((p) => p.translatedText!.trim())
+          .where((t) => t.isNotEmpty)
+          .toList();
+      if (recentContext.length > 2) {
+        recentContext.removeRange(0, recentContext.length - 2);
+      }
+
       int doneCount = paragraphs.length - pendingParagraphs.length;
       int offset = 0;
+      int transientRetries = 0;
 
       while (offset < pendingParagraphs.length) {
         if (_cancelled) break;
@@ -276,6 +324,7 @@ class TranslationQueueController {
           final translations = await translator.translateBatch(
             paragraphs: chunk.map((e) => e.sourceText).toList(),
             targetLanguage: targetLanguage,
+            contextTail: List<String>.from(recentContext),
             overrideModel: chosenModel,
           );
 
@@ -284,10 +333,15 @@ class TranslationQueueController {
             if (item.id != null) {
               await db.saveParagraphTranslation(item.id!, translations[k]);
               doneCount++;
+              recentContext.add(translations[k]);
+              if (recentContext.length > 2) {
+                recentContext.removeAt(0);
+              }
             }
           }
 
           offset += chunk.length;
+          transientRetries = 0;
 
           _progress = _progress.copyWith(
             translatedParagraphsInChapter: doneCount,
@@ -302,7 +356,6 @@ class TranslationQueueController {
             final cooldown = _parseCooldownDuration(e);
             _modelCooldownUntil[chosenModel] = DateTime.now().add(cooldown);
 
-            // Если в пуле есть другая свободная модель — переключаемся мгновенно без паузы
             final nextFree = _pickAvailableModel(modelPool);
             if (nextFree != null) {
               _progress = _progress.copyWith(activeModel: nextFree);
@@ -317,6 +370,12 @@ class TranslationQueueController {
             );
             final waitSec = _shortestWait(modelPool).inSeconds.clamp(1, 3600);
             await _waitWithCountdown(waitSec);
+            continue;
+          }
+
+          if (_isTransientError(e) && transientRetries < 4) {
+            transientRetries++;
+            await Future.delayed(Duration(seconds: 2 * transientRetries));
             continue;
           }
 
