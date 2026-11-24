@@ -117,9 +117,49 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
-  /// Всплывающее окно с переводом выделенного слова или строки
+  Future<void> _saveToDictionaryDirectly(String selectedText) async {
+    final clean = selectedText.trim();
+    if (clean.isEmpty) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 1),
+        content: Text('Переводим и сохраняем «$clean»...'),
+      ),
+    );
+
+    try {
+      final translated = await widget.translatorService.translateSelection(
+        selectedText: clean,
+        targetLanguage: widget.targetLanguage,
+      );
+
+      await BookDatabase.instance.addDictionaryEntry(
+        DictionaryEntry(
+          sourceText: clean,
+          translatedText: translated,
+          bookTitle: widget.book.title,
+          createdAt: DateTime.now().millisecondsSinceEpoch,
+        ),
+      );
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('В словаре: $clean — $translated'),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Не удалось добавить в словарь: $e')),
+      );
+    }
+  }
+
   void _showSelectionTranslationSheet(String selectedText) {
     final palette = ReaderPalette.of(_appearance.colorTheme);
+    bool saved = false;
 
     showModalBottomSheet<void>(
       context: context,
@@ -128,88 +168,128 @@ class _ReaderScreenState extends State<ReaderScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (ctx) {
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(Icons.translate, color: palette.accent, size: 20),
-                  const SizedBox(width: 8),
-                  Text(
-                    'Быстрый перевод фрагмента',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: palette.text,
+                  Row(
+                    children: [
+                      Icon(Icons.translate, color: palette.accent, size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Быстрый перевод фрагмента',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: palette.text,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: palette.background,
+                      borderRadius: BorderRadius.circular(12),
                     ),
+                    child: Text(
+                      selectedText,
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontStyle: FontStyle.italic,
+                        color: palette.secondaryText,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  FutureBuilder<String>(
+                    future: widget.translatorService.translateSelection(
+                      selectedText: selectedText,
+                      targetLanguage: widget.targetLanguage,
+                    ),
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState == ConnectionState.waiting) {
+                        return Row(
+                          children: [
+                            SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: palette.accent,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Text(
+                              'Переводим...',
+                              style: TextStyle(color: palette.text),
+                            ),
+                          ],
+                        );
+                      }
+                      if (snapshot.hasError) {
+                        return Text(
+                          'Не удалось перевести: ${snapshot.error}',
+                          style: const TextStyle(color: Colors.redAccent),
+                        );
+                      }
+                      final resultText = snapshot.data ?? '';
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          SelectableText(
+                            resultText,
+                            style: TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w500,
+                              height: 1.4,
+                              color: palette.text,
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          OutlinedButton.icon(
+                            onPressed: saved
+                                ? null
+                                : () async {
+                                    await BookDatabase.instance
+                                        .addDictionaryEntry(
+                                      DictionaryEntry(
+                                        sourceText: selectedText,
+                                        translatedText: resultText,
+                                        bookTitle: widget.book.title,
+                                        createdAt: DateTime.now()
+                                            .millisecondsSinceEpoch,
+                                      ),
+                                    );
+                                    setModalState(() => saved = true);
+                                  },
+                            icon: Icon(
+                              saved ? Icons.check : Icons.bookmark_add_outlined,
+                              color: palette.accent,
+                            ),
+                            label: Text(
+                              saved
+                                  ? 'Сохранено в словарь'
+                                  : 'Сохранить в словарь',
+                              style: TextStyle(color: palette.text),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: palette.background,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Text(
-                  selectedText,
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontStyle: FontStyle.italic,
-                    color: palette.secondaryText,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 14),
-              FutureBuilder<String>(
-                future: widget.translatorService.translateSelection(
-                  selectedText: selectedText,
-                  targetLanguage: widget.targetLanguage,
-                ),
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState == ConnectionState.waiting) {
-                    return Row(
-                      children: [
-                        SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: palette.accent,
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Text(
-                          'Переводим...',
-                          style: TextStyle(color: palette.text),
-                        ),
-                      ],
-                    );
-                  }
-                  if (snapshot.hasError) {
-                    return Text(
-                      'Не удалось перевести: ${snapshot.error}',
-                      style: const TextStyle(color: Colors.redAccent),
-                    );
-                  }
-                  return SelectableText(
-                    snapshot.data ?? '',
-                    style: TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w500,
-                      height: 1.4,
-                      color: palette.text,
-                    ),
-                  );
-                },
-              ),
-            ],
-          ),
+            );
+          },
         );
       },
     );
@@ -285,7 +365,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   ),
                   const SizedBox(height: 14),
 
-                  // 1. Язык текста на странице
                   Text(
                     'Отображение текста',
                     style: TextStyle(
@@ -339,7 +418,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   ),
                   const SizedBox(height: 16),
 
-                  // 2. Цветовая гамма
                   Text(
                     'Цветовая схема',
                     style: TextStyle(
@@ -400,7 +478,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   ),
                   const SizedBox(height: 16),
 
-                  // 3. Тип чтения
                   Text(
                     'Режим листания',
                     style: TextStyle(
@@ -452,7 +529,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   ),
                   const SizedBox(height: 16),
 
-                  // 4. Размер шрифта
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -510,7 +586,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     ],
                   ),
 
-                  // 5. Межстрочный интервал
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -867,6 +942,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
                             overrideAhead: 1,
                           ),
                           onTranslateSelection: _showSelectionTranslationSheet,
+                          onSaveSelectionToDictionary:
+                              _saveToDictionaryDirectly,
                         ),
             ),
           ],
@@ -893,17 +970,31 @@ class _ReaderScreenState extends State<ReaderScreen> {
         _scrollSelectedText = content?.plainText ?? '';
       },
       contextMenuBuilder: (context, selectableRegionState) {
+        final baseItems =
+            selectableRegionState.contextMenuButtonItems.where((item) {
+          return item.type == ContextMenuButtonType.copy ||
+              item.type == ContextMenuButtonType.selectAll;
+        }).toList();
+
+        final cleanText = _scrollSelectedText.trim();
         final items = <ContextMenuButtonItem>[
-          ...selectableRegionState.contextMenuButtonItems,
-          if (_scrollSelectedText.trim().isNotEmpty)
+          if (cleanText.isNotEmpty) ...[
             ContextMenuButtonItem(
               label: 'Перевести',
               onPressed: () {
-                final toTranslate = _scrollSelectedText.trim();
                 selectableRegionState.hideToolbar();
-                _showSelectionTranslationSheet(toTranslate);
+                _showSelectionTranslationSheet(cleanText);
               },
             ),
+            ContextMenuButtonItem(
+              label: 'В словарь',
+              onPressed: () {
+                selectableRegionState.hideToolbar();
+                _saveToDictionaryDirectly(cleanText);
+              },
+            ),
+          ],
+          ...baseItems,
         ];
         return AdaptiveTextSelectionToolbar.buttonItems(
           anchors: selectableRegionState.contextMenuAnchors,
