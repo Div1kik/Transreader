@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'db/book_database.dart';
 import 'models/book_models.dart';
 import 'screens/reader_screen.dart';
@@ -76,7 +77,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
   TranslatorSettings _settings = const TranslatorSettings();
   late final TranslatorService _translatorService;
   late final TranslationQueueController _queueController;
+
+  int _tabIndex = 0;
   List<Book> _books = [];
+  List<DictionaryEntry> _dictionary = [];
+  final TextEditingController _dictSearchController = TextEditingController();
+
   bool _loading = true;
   bool _importing = false;
 
@@ -93,6 +99,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   void dispose() {
+    _dictSearchController.dispose();
     _queueController.stop();
     _queueController.dispose();
     super.dispose();
@@ -101,20 +108,28 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _initAll() async {
     final loadedSettings = await _settingsService.loadSettings();
     final loadedBooks = await BookDatabase.instance.getBooks();
+    final loadedDict = await BookDatabase.instance.getDictionaryEntries();
     if (!mounted) return;
     _translatorService.settings = loadedSettings;
     _queueController.updateSettings(loadedSettings);
     setState(() {
       _settings = loadedSettings;
       _books = loadedBooks;
+      _dictionary = loadedDict;
       _loading = false;
     });
   }
 
-  Future<void> _reloadBooks() async {
+  Future<void> _reloadAll() async {
     final loadedBooks = await BookDatabase.instance.getBooks();
+    final loadedDict = await BookDatabase.instance.getDictionaryEntries(
+      query: _dictSearchController.text,
+    );
     if (!mounted) return;
-    setState(() => _books = loadedBooks);
+    setState(() {
+      _books = loadedBooks;
+      _dictionary = loadedDict;
+    });
   }
 
   String _decodeFileBytes(List<int> bytes) {
@@ -200,7 +215,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         parsed.chapters,
         parsed.paragraphs,
       );
-      await _reloadBooks();
+      await _reloadAll();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -225,8 +240,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _queueController.updateSettings(updated);
       setState(() => _settings = updated);
     }
-    // Всегда обновляем библиотеку после возврата (на случай восстановления бэкапа)
-    await _reloadBooks();
+    await _reloadAll();
   }
 
   void _openBook(Book book) {
@@ -241,7 +255,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             ),
           ),
         )
-        .then((_) => _reloadBooks());
+        .then((_) => _reloadAll());
   }
 
   void _downloadFullBook(Book book) {
@@ -250,7 +264,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'Подключите переводчик в 1 клик или включите офлайн-модель в настройках',
+            'Подключите ключ Groq или включите офлайн-модель в настройках',
           ),
         ),
       );
@@ -279,7 +293,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _queueController.stop();
     }
     await BookDatabase.instance.deleteBook(book.id);
-    await _reloadBooks();
+    await _reloadAll();
+  }
+
+  Future<void> _deleteDictEntry(DictionaryEntry entry) async {
+    if (entry.id == null) return;
+    await BookDatabase.instance.deleteDictionaryEntry(entry.id!);
+    await _reloadAll();
   }
 
   @override
@@ -290,11 +310,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
       appBar: AppBar(
         title: Row(
           children: [
-            Icon(Icons.auto_stories, color: accent, size: 22),
+            Icon(
+              _tabIndex == 0 ? Icons.auto_stories : Icons.bookmark_border,
+              color: accent,
+              size: 22,
+            ),
             const SizedBox(width: 8),
-            const Text(
-              'TransReader',
-              style: TextStyle(fontWeight: FontWeight.w700),
+            Text(
+              _tabIndex == 0
+                  ? 'TransReader'
+                  : 'Словарь (${_dictionary.length})',
+              style: const TextStyle(fontWeight: FontWeight.w700),
             ),
           ],
         ),
@@ -306,22 +332,45 @@ class _LibraryScreenState extends State<LibraryScreen> {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _importing ? null : _importBook,
-        icon: _importing
-            ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Color(0xFF191613),
-                ),
-              )
-            : const Icon(Icons.add),
-        label: Text(
-          _importing ? 'Загрузка...' : 'Добавить книгу',
-          style: const TextStyle(fontWeight: FontWeight.w600),
-        ),
+      floatingActionButton: _tabIndex == 0
+          ? FloatingActionButton.extended(
+              onPressed: _importing ? null : _importBook,
+              icon: _importing
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Color(0xFF191613),
+                      ),
+                    )
+                  : const Icon(Icons.add),
+              label: Text(
+                _importing ? 'Загрузка...' : 'Добавить книгу',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            )
+          : null,
+      bottomNavigationBar: NavigationBar(
+        backgroundColor: const Color(0xFF211C18),
+        indicatorColor: accent.withOpacity(0.22),
+        selectedIndex: _tabIndex,
+        onDestinationSelected: (idx) {
+          setState(() => _tabIndex = idx);
+          _reloadAll();
+        },
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.menu_book_outlined),
+            selectedIcon: Icon(Icons.menu_book),
+            label: 'Библиотека',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.bookmarks_outlined),
+            selectedIcon: Icon(Icons.bookmarks),
+            label: 'Словарь',
+          ),
+        ],
       ),
       body: StreamBuilder<TranslationProgress>(
         stream: _queueController.progressStream,
@@ -398,128 +447,268 @@ class _LibraryScreenState extends State<LibraryScreen> {
               Expanded(
                 child: _loading
                     ? Center(child: CircularProgressIndicator(color: accent))
-                    : _books.isEmpty
-                        ? Center(
-                            child: Padding(
-                              padding: const EdgeInsets.all(24),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    Icons.menu_book,
-                                    size: 68,
-                                    color: accent,
-                                  ),
-                                  const SizedBox(height: 14),
-                                  const Text(
-                                    'Ваша библиотека пуста',
-                                    style: TextStyle(
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.w600,
-                                      color: Color(0xFFF3ECE4),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 6),
-                                  const Text(
-                                    'Нажмите «Добавить книгу», чтобы открыть файл .txt или .fb2',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(color: Color(0xFFA89E93)),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          )
-                        : ListView.separated(
-                            padding: const EdgeInsets.fromLTRB(12, 12, 12, 84),
-                            itemCount: _books.length,
-                            separatorBuilder: (_, __) =>
-                                const SizedBox(height: 8),
-                            itemBuilder: (context, index) {
-                              final book = _books[index];
-                              final isThisDownloading =
-                                  (p.isRunning || p.rateLimitWaitSeconds > 0) &&
-                                      p.activeBookId == book.id;
-
-                              return Card(
-                                child: ListTile(
-                                  contentPadding: const EdgeInsets.symmetric(
-                                    horizontal: 14,
-                                    vertical: 6,
-                                  ),
-                                  leading: Container(
-                                    width: 42,
-                                    height: 42,
-                                    decoration: BoxDecoration(
-                                      color: accent.withOpacity(0.15),
-                                      borderRadius: BorderRadius.circular(10),
-                                    ),
-                                    child: Icon(Icons.book, color: accent),
-                                  ),
-                                  title: Text(
-                                    book.title,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                      color: Color(0xFFF3ECE4),
-                                    ),
-                                  ),
-                                  subtitle: Padding(
-                                    padding: const EdgeInsets.only(top: 4),
-                                    child: Text(
-                                      isThisDownloading
-                                          ? 'Переводится: гл. ${p.currentChapter} (${p.translatedParagraphsInChapter}/${p.totalParagraphsInChapter})'
-                                          : 'Формат: ${book.format.toUpperCase()} • Глав: ${book.totalChapters}',
-                                      style: TextStyle(
-                                        color: isThisDownloading
-                                            ? accent
-                                            : const Color(0xFFA89E93),
-                                        fontSize: 12,
-                                      ),
-                                    ),
-                                  ),
-                                  onTap: () => _openBook(book),
-                                  trailing: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      if (isThisDownloading)
-                                        IconButton(
-                                          tooltip: 'Остановить загрузку',
-                                          icon: Icon(
-                                            Icons.stop_circle_outlined,
-                                            color: accent,
-                                          ),
-                                          onPressed: _queueController.stop,
-                                        )
-                                      else
-                                        IconButton(
-                                          tooltip: 'Скачать всю книгу',
-                                          icon: Icon(
-                                            Icons.cloud_download_outlined,
-                                            color: accent,
-                                          ),
-                                          onPressed: () =>
-                                              _downloadFullBook(book),
-                                        ),
-                                      IconButton(
-                                        tooltip: 'Удалить книгу',
-                                        icon: const Icon(
-                                          Icons.delete_outline,
-                                          color: Color(0xFFA89E93),
-                                        ),
-                                        onPressed: () => _deleteBook(book),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
+                    : _tabIndex == 0
+                        ? _buildLibraryTab(accent, p)
+                        : _buildDictionaryTab(accent),
               ),
             ],
           );
         },
       ),
+    );
+  }
+
+  Widget _buildLibraryTab(Color accent, TranslationProgress p) {
+    if (_books.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.menu_book,
+                size: 68,
+                color: accent,
+              ),
+              const SizedBox(height: 14),
+              const Text(
+                'Ваша библиотека пуста',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFFF3ECE4),
+                ),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'Нажмите «Добавить книгу», чтобы открыть файл .txt или .fb2',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Color(0xFFA89E93)),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 84),
+      itemCount: _books.length,
+      separatorBuilder: (_, __) => const SizedBox(height: 8),
+      itemBuilder: (context, index) {
+        final book = _books[index];
+        final isThisDownloading =
+            (p.isRunning || p.rateLimitWaitSeconds > 0) &&
+                p.activeBookId == book.id;
+
+        return Card(
+          child: ListTile(
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 14,
+              vertical: 6,
+            ),
+            leading: Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(
+                color: accent.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(Icons.book, color: accent),
+            ),
+            title: Text(
+              book.title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontWeight: FontWeight.w600,
+                color: Color(0xFFF3ECE4),
+              ),
+            ),
+            subtitle: Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                isThisDownloading
+                    ? 'Переводится: гл. ${p.currentChapter} (${p.translatedParagraphsInChapter}/${p.totalParagraphsInChapter})'
+                    : 'Формат: ${book.format.toUpperCase()} • Глав: ${book.totalChapters}',
+                style: TextStyle(
+                  color:
+                      isThisDownloading ? accent : const Color(0xFFA89E93),
+                  fontSize: 12,
+                ),
+              ),
+            ),
+            onTap: () => _openBook(book),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (isThisDownloading)
+                  IconButton(
+                    tooltip: 'Остановить загрузку',
+                    icon: Icon(
+                      Icons.stop_circle_outlined,
+                      color: accent,
+                    ),
+                    onPressed: _queueController.stop,
+                  )
+                else
+                  IconButton(
+                    tooltip: 'Скачать всю книгу',
+                    icon: Icon(
+                      Icons.cloud_download_outlined,
+                      color: accent,
+                    ),
+                    onPressed: () => _downloadFullBook(book),
+                  ),
+                IconButton(
+                  tooltip: 'Удалить книгу',
+                  icon: const Icon(
+                    Icons.delete_outline,
+                    color: Color(0xFFA89E93),
+                  ),
+                  onPressed: () => _deleteBook(book),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildDictionaryTab(Color accent) {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+          child: TextField(
+            controller: _dictSearchController,
+            onChanged: (_) => _reloadAll(),
+            decoration: InputDecoration(
+              hintText: 'Поиск по словам и переводам...',
+              prefixIcon: const Icon(Icons.search),
+              suffixIcon: _dictSearchController.text.isNotEmpty
+                  ? IconButton(
+                      icon: const Icon(Icons.clear),
+                      onPressed: () {
+                        _dictSearchController.clear();
+                        _reloadAll();
+                      },
+                    )
+                  : null,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 14),
+            ),
+          ),
+        ),
+        Expanded(
+          child: _dictionary.isEmpty
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.bookmarks_outlined,
+                          size: 64,
+                          color: accent,
+                        ),
+                        const SizedBox(height: 14),
+                        const Text(
+                          'Словарь пока пуст',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFFF3ECE4),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        const Text(
+                          'Выделите любое слово или фразу при чтении книги и нажмите «В словарь»',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Color(0xFFA89E93)),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
+                  itemCount: _dictionary.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 8),
+                  itemBuilder: (context, index) {
+                    final item = _dictionary[index];
+                    return Card(
+                      child: ListTile(
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 8,
+                        ),
+                        title: Text(
+                          item.sourceText,
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                            color: accent,
+                          ),
+                        ),
+                        subtitle: Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                item.translatedText,
+                                style: const TextStyle(
+                                  fontSize: 15,
+                                  color: Color(0xFFF3ECE4),
+                                ),
+                              ),
+                              if (item.bookTitle.isNotEmpty) ...[
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Книга: ${item.bookTitle}',
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Color(0xFFA89E93),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                        onLongPress: () {
+                          Clipboard.setData(
+                            ClipboardData(
+                              text:
+                                  '${item.sourceText} — ${item.translatedText}',
+                            ),
+                          );
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              duration: Duration(seconds: 1),
+                              content: Text('Скопировано в буфер обмена'),
+                            ),
+                          );
+                        },
+                        trailing: IconButton(
+                          tooltip: 'Удалить из словаря',
+                          icon: const Icon(
+                            Icons.delete_outline,
+                            color: Color(0xFFA89E93),
+                          ),
+                          onPressed: () => _deleteDictEntry(item),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
     );
   }
 }
