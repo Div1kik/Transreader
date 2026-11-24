@@ -1,10 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'package:app_links/app_links.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:webview_flutter/webview_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../db/book_database.dart';
 import '../services/offline_translator_service.dart';
 import '../services/settings_service.dart';
@@ -37,7 +38,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _offlineModelReady = false;
   bool _backupBusy = false;
 
-  static const String _callbackUrl = 'https://transreader.app/callback';
+  String? _pkceCodeVerifier;
+  StreamSubscription<Uri>? _linkSub;
+
+  // HTTPS-мостик на GitHub Pages, который сразу переводит в диплинк transreader://callback
+  static const String _callbackUrl = 'https://div1kik.github.io/Transreader/';
 
   @override
   void initState() {
@@ -57,6 +62,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     _advancedExpanded = _engineMode == TranslationEngineMode.customApi;
     _checkOfflineModel();
+    _listenDeepLinks();
   }
 
   Future<void> _checkOfflineModel() async {
@@ -68,6 +74,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (mounted) {
       setState(() => _offlineModelReady = ready);
     }
+  }
+
+  void _listenDeepLinks() {
+    final appLinks = AppLinks();
+    _linkSub = appLinks.uriLinkStream.listen((uri) async {
+      if (uri.scheme == 'transreader' && uri.host == 'callback') {
+        final code = uri.queryParameters['code'];
+        if (code != null && code.isNotEmpty) {
+          await _exchangeOpenRouterCode(code);
+        }
+      }
+    });
   }
 
   String _generateCodeVerifier() {
@@ -88,6 +106,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final verifier = _generateCodeVerifier();
       final challenge = _generateCodeChallenge(verifier);
+      _pkceCodeVerifier = verifier;
 
       final authUri = Uri.https('openrouter.ai', '/auth', {
         'callback_url': _callbackUrl,
@@ -95,20 +114,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
         'code_challenge_method': 'S256',
       });
 
-      if (!mounted) return;
-      final code = await Navigator.of(context).push<String>(
-        MaterialPageRoute(
-          builder: (_) => _OpenRouterWebViewAuthScreen(
-            authUri: authUri,
-            callbackPrefix: _callbackUrl,
-          ),
-        ),
+      final launched = await launchUrl(
+        authUri,
+        mode: LaunchMode.externalApplication,
       );
-
-      if (code != null && code.isNotEmpty) {
-        await _exchangeOpenRouterCode(code, verifier);
-      } else if (mounted) {
-        setState(() => _authInProgress = false);
+      if (!launched) {
+        throw Exception('Не удалось открыть браузер для авторизации');
       }
     } catch (e) {
       if (!mounted) return;
@@ -119,14 +130,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Future<void> _exchangeOpenRouterCode(String code, String verifier) async {
+  Future<void> _exchangeOpenRouterCode(String code) async {
     try {
       final response = await http.post(
         Uri.parse('https://openrouter.ai/api/v1/auth/keys'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'code': code,
-          'code_verifier': verifier,
+          'code_verifier': _pkceCodeVerifier ?? '',
           'code_challenge_method': 'S256',
         }),
       );
@@ -245,6 +256,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
+    _linkSub?.cancel();
     _endpointController.dispose();
     _apiKeyController.dispose();
     _modelController.dispose();
@@ -638,87 +650,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             icon: const Icon(Icons.save),
             label: const Text('Сохранить настройки'),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-class _OpenRouterWebViewAuthScreen extends StatefulWidget {
-  final Uri authUri;
-  final String callbackPrefix;
-
-  const _OpenRouterWebViewAuthScreen({
-    required this.authUri,
-    required this.callbackPrefix,
-  });
-
-  @override
-  State<_OpenRouterWebViewAuthScreen> createState() =>
-      _OpenRouterWebViewAuthScreenState();
-}
-
-class _OpenRouterWebViewAuthScreenState
-    extends State<_OpenRouterWebViewAuthScreen> {
-  late final WebViewController _controller;
-  bool _isLoading = true;
-  bool _codeHandled = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setUserAgent(
-        'Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
-      )
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageStarted: (url) {
-            if (mounted) setState(() => _isLoading = true);
-            _tryExtractCode(url);
-          },
-          onPageFinished: (_) {
-            if (mounted) setState(() => _isLoading = false);
-          },
-          onNavigationRequest: (request) {
-            if (_tryExtractCode(request.url)) {
-              return NavigationDecision.prevent;
-            }
-            return NavigationDecision.navigate;
-          },
-        ),
-      )
-      ..loadRequest(widget.authUri);
-  }
-
-  bool _tryExtractCode(String url) {
-    if (_codeHandled) return true;
-    if (url.startsWith(widget.callbackPrefix)) {
-      final uri = Uri.tryParse(url);
-      final code = uri?.queryParameters['code'];
-      if (code != null && code.isNotEmpty) {
-        _codeHandled = true;
-        if (mounted) {
-          Navigator.of(context).pop(code);
-        }
-        return true;
-      }
-    }
-    return false;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Подключение OpenRouter'),
-      ),
-      body: Stack(
-        children: [
-          WebViewWidget(controller: _controller),
-          if (_isLoading)
-            const LinearProgressIndicator(minHeight: 3),
         ],
       ),
     );
