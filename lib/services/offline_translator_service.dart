@@ -37,22 +37,35 @@ class OfflineTranslatorService {
   Future<void> downloadLanguagePair({
     TranslateLanguage source = TranslateLanguage.english,
     String targetLanguage = 'Russian',
+    void Function(String step)? onProgress,
   }) async {
     final target = _mapTargetLang(targetLanguage);
 
     if (!await _modelManager.isModelDownloaded(source.bcpCode)) {
+      onProgress?.call('Загрузка базового пакета (${source.bcpCode})...');
       final okSource = await _modelManager
           .downloadModel(source.bcpCode, isWifiRequired: false)
-          .timeout(const Duration(seconds: 90));
+          .timeout(
+            const Duration(seconds: 90),
+            onTimeout: () => throw Exception(
+              'Таймаут загрузки (${source.bcpCode}). Проверьте VPN (для Google ML Kit лучше отключить VPN или разрешить «Диспетчер загрузок»).',
+            ),
+          );
       if (!okSource) {
         throw Exception('Не удалось скачать базовый пакет (${source.bcpCode})');
       }
     }
 
     if (!await _modelManager.isModelDownloaded(target.bcpCode)) {
+      onProgress?.call('Загрузка языкового пакета (${target.bcpCode})...');
       final okTarget = await _modelManager
           .downloadModel(target.bcpCode, isWifiRequired: false)
-          .timeout(const Duration(seconds: 90));
+          .timeout(
+            const Duration(seconds: 90),
+            onTimeout: () => throw Exception(
+              'Таймаут загрузки (${target.bcpCode}). Проверьте VPN (для Google ML Kit лучше отключить VPN или разрешить «Диспетчер загрузок»).',
+            ),
+          );
       if (!okTarget) {
         throw Exception('Не удалось скачать языковой пакет (${target.bcpCode})');
       }
