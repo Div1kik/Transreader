@@ -32,11 +32,12 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Configure AndroidManifest (Name, Internet, Impeller, DeepLink)
+      - name: Configure AndroidManifest (Name, Internet, Impeller, SingleTask, DeepLink)
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST" ]; then
             sed -i 's/android:label="[^"]*"/android:label="TransReader"/g' "$MANIFEST"
+            sed -i 's/android:launchMode="singleTop"/android:launchMode="singleTask"/g' "$MANIFEST"
             if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
               sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$MANIFEST"
             fi
