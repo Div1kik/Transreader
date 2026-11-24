@@ -1,399 +1,551 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
+import 'package:app_links/app_links.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import '../models/book_models.dart';
+import 'package:url_launcher/url_launcher.dart';
+import '../services/offline_translator_service.dart';
 import '../services/settings_service.dart';
-
-class _ProviderPreset {
-  final String label;
-  final String endpoint;
-  final String defaultModel;
-  final List<String> defaultFallbacks;
-
-  const _ProviderPreset({
-    required this.label,
-    required this.endpoint,
-    required this.defaultModel,
-    this.defaultFallbacks = const [],
-  });
-}
 
 class SettingsScreen extends StatefulWidget {
   final TranslatorSettings initialSettings;
 
-  const SettingsScreen({super.key, required this.initialSettings});
+  const SettingsScreen({
+    super.key,
+    required this.initialSettings,
+  });
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  static const List<_ProviderPreset> _presets = [
-    _ProviderPreset(
-      label: 'Groq (Free)',
-      endpoint: 'https://api.groq.com/openai/v1/chat/completions',
-      defaultModel: 'openai/gpt-oss-120b',
-      defaultFallbacks: ['qwen/qwen3.8-27b', 'openai/gpt-oss-20b'],
-    ),
-    _ProviderPreset(
-      label: 'Gemini (Free)',
-      endpoint:
-          'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
-      defaultModel: 'gemini-3.8-flash',
-    ),
-    _ProviderPreset(
-      label: 'OpenRouter',
-      endpoint: 'https://openrouter.ai/api/v1/chat/completions',
-      defaultModel: 'google/gemma-2-9b-it:free',
-    ),
-    _ProviderPreset(
-      label: 'OpenAI',
-      endpoint: 'https://api.openai.com/v1/chat/completions',
-      defaultModel: 'gpt-4o-mini',
-    ),
-    _ProviderPreset(
-      label: 'DeepSeek',
-      endpoint: 'https://api.deepseek.com/chat/completions',
-      defaultModel: 'deepseek-chat',
-    ),
-  ];
-
-  late final TextEditingController _endpointCtrl;
-  late final TextEditingController _apiKeyCtrl;
-  late final TextEditingController _modelCtrl;
-  late final TextEditingController _langCtrl;
+  final SettingsService _settingsService = SettingsService();
+  late TranslationEngineMode _engineMode;
+  late TextEditingController _endpointController;
+  late TextEditingController _apiKeyController;
+  late TextEditingController _modelController;
+  late TextEditingController _fallbacksController;
+  late TextEditingController _langController;
 
   bool _obscureKey = true;
-  bool _loadingModels = false;
-  late bool _autoSwitchModels;
-  late List<String> _selectedModels;
-  List<String> _availableModels = [];
-  String? _modelsError;
+  bool _advancedExpanded = false;
+  bool _authInProgress = false;
+  bool _downloadingOfflineModel = false;
+  bool _offlineModelReady = false;
+
+  // PKCE verifier для OpenRouter OAuth
+  String? _pkceCodeVerifier;
+  StreamSubscription<Uri>? _linkSub;
 
   @override
   void initState() {
     super.initState();
-    _endpointCtrl =
+    _engineMode = widget.initialSettings.engineMode;
+    _endpointController =
         TextEditingController(text: widget.initialSettings.endpointUrl);
-    _apiKeyCtrl = TextEditingController(text: widget.initialSettings.apiKey);
-    _modelCtrl = TextEditingController(text: widget.initialSettings.model);
-    _langCtrl =
+    _apiKeyController =
+        TextEditingController(text: widget.initialSettings.apiKey);
+    _modelController =
+        TextEditingController(text: widget.initialSettings.model);
+    _fallbacksController = TextEditingController(
+      text: widget.initialSettings.fallbackModels.join(', '),
+    );
+    _langController =
         TextEditingController(text: widget.initialSettings.targetLanguage);
-    _autoSwitchModels = widget.initialSettings.autoSwitchModels;
 
-    _selectedModels = List<String>.from(widget.initialSettings.activeModelChain);
-    _availableModels = List<String>.from(_selectedModels);
+    _advancedExpanded = _engineMode == TranslationEngineMode.customApi;
+    _checkOfflineModel();
+    _listenDeepLinks();
+  }
+
+  Future<void> _checkOfflineModel() async {
+    final ready = await OfflineTranslatorService.instance.isPairDownloaded(
+      targetLanguage: _langController.text.trim().isEmpty
+          ? 'Russian'
+          : _langController.text.trim(),
+    );
+    if (mounted) {
+      setState(() => _offlineModelReady = ready);
+    }
+  }
+
+  void _listenDeepLinks() {
+    final appLinks = AppLinks();
+    _linkSub = appLinks.uriLinkStream.listen((uri) async {
+      if (uri.scheme == 'transreader' && uri.host == 'callback') {
+        final code = uri.queryParameters['code'];
+        if (code != null && code.isNotEmpty) {
+          await _exchangeOpenRouterCode(code);
+        }
+      }
+    });
+  }
+
+  String _generateCodeVerifier() {
+    const chars =
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+    final rnd = Random.secure();
+    return List.generate(64, (_) => chars[rnd.nextInt(chars.length)]).join();
+  }
+
+  String _generateCodeChallenge(String verifier) {
+    final bytes = utf8.encode(verifier);
+    final digest = sha256.convert(bytes);
+    return base64UrlEncode(digest.bytes).replaceAll('=', '');
+  }
+
+  Future<void> _startOpenRouterOneClickAuth() async {
+    setState(() => _authInProgress = true);
+    try {
+      final verifier = _generateCodeVerifier();
+      final challenge = _generateCodeChallenge(verifier);
+      _pkceCodeVerifier = verifier;
+
+      final authUri = Uri.https('openrouter.ai', '/auth', {
+        'callback_url': 'transreader://callback',
+        'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+      });
+
+      final launched = await launchUrl(
+        authUri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!launched) {
+        throw Exception('Не удалось открыть браузер для авторизации');
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _authInProgress = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка запуска авторизации: $e')),
+      );
+    }
+  }
+
+  Future<void> _exchangeOpenRouterCode(String code) async {
+    try {
+      final response = await http.post(
+        Uri.parse('https://openrouter.ai/api/v1/auth/keys'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'code': code,
+          'code_verifier': _pkceCodeVerifier ?? '',
+          'code_challenge_method': 'S256',
+        }),
+      );
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Exception('Ошибка получения ключа (${response.statusCode})');
+      }
+
+      final data = jsonDecode(response.body);
+      final receivedKey = data['key']?.toString() ?? '';
+      if (receivedKey.isEmpty) {
+        throw Exception('Сервер не вернул ключ');
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _engineMode = TranslationEngineMode.oneClickOpenRouter;
+        _apiKeyController.text = receivedKey;
+        _endpointController.text =
+            'https://openrouter.ai/api/v1/chat/completions';
+        _modelController.text = 'meta-llama/llama-3.3-70b-instruct:free';
+        _fallbacksController.text =
+            'google/gemma-3-27b-it:free, mistralai/mistral-small-3.1-24b-instruct:free, qwen/qwen-2.5-72b-instruct:free';
+        _authInProgress = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Готово! Ключ автоматически подключён и сохранён.'),
+        ),
+      );
+      await _save();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _authInProgress = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка обмена ключа: $e')),
+      );
+    }
+  }
+
+  Future<void> _downloadOfflineModel() async {
+    setState(() => _downloadingOfflineModel = true);
+    try {
+      await OfflineTranslatorService.instance.downloadLanguagePair(
+        targetLanguage: _langController.text.trim().isEmpty
+            ? 'Russian'
+            : _langController.text.trim(),
+      );
+      if (!mounted) return;
+      setState(() {
+        _offlineModelReady = true;
+        _engineMode = TranslationEngineMode.offlineLocal;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Офлайн-модель скачана! Теперь можно переводить без интернета.'),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка загрузки офлайн-модели: $e')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _downloadingOfflineModel = false);
+      }
+    }
   }
 
   @override
   void dispose() {
-    _endpointCtrl.dispose();
-    _apiKeyCtrl.dispose();
-    _modelCtrl.dispose();
-    _langCtrl.dispose();
+    _linkSub?.cancel();
+    _endpointController.dispose();
+    _apiKeyController.dispose();
+    _modelController.dispose();
+    _fallbacksController.dispose();
+    _langController.dispose();
     super.dispose();
   }
 
-  void _applyPreset(_ProviderPreset preset) {
-    setState(() {
-      _endpointCtrl.text = preset.endpoint;
-      _modelCtrl.text = preset.defaultModel;
-      _selectedModels = [
-        preset.defaultModel,
-        ...preset.defaultFallbacks,
-      ];
-      _availableModels = List<String>.from(_selectedModels);
-      _modelsError = null;
-    });
-  }
-
-  void _toggleModelSelection(String modelName) {
-    setState(() {
-      if (_autoSwitchModels) {
-        if (_selectedModels.contains(modelName)) {
-          if (_selectedModels.length > 1) {
-            _selectedModels.remove(modelName);
-          }
-        } else {
-          _selectedModels.add(modelName);
-        }
-        _modelCtrl.text = _selectedModels.first;
-      } else {
-        _selectedModels = [modelName];
-        _modelCtrl.text = modelName;
-      }
-    });
-  }
-
-  Uri _buildModelsUri(String rawEndpoint, String apiKey) {
-    var clean = rawEndpoint.trim();
-    if (clean.endsWith('/')) {
-      clean = clean.substring(0, clean.length - 1);
-    }
-    if (clean.endsWith('/chat/completions')) {
-      clean = clean.substring(0, clean.length - '/chat/completions'.length);
-    } else if (clean.endsWith('/completions')) {
-      clean = clean.substring(0, clean.length - '/completions'.length);
-    }
-
-    final baseUri = Uri.parse('$clean/models');
-    if (baseUri.host.contains('googleapis.com') && apiKey.isNotEmpty) {
-      return baseUri.replace(
-        queryParameters: {...baseUri.queryParameters, 'key': apiKey},
-      );
-    }
-    return baseUri;
-  }
-
-  Future<void> _fetchModels() async {
-    final endpoint = _endpointCtrl.text.trim();
-    final apiKey = _apiKeyCtrl.text.trim();
-
-    if (endpoint.isEmpty) {
-      setState(() => _modelsError = 'Сначала выбери сервис или укажи URL');
-      return;
-    }
-
-    setState(() {
-      _loadingModels = true;
-      _modelsError = null;
-    });
-
-    try {
-      final modelsUri = _buildModelsUri(endpoint, apiKey);
-      final response = await http.get(
-        modelsUri,
-        headers: {
-          if (apiKey.isNotEmpty) 'Authorization': 'Bearer $apiKey',
-        },
-      );
-
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        final bodyPreview = utf8.decode(response.bodyBytes);
-        throw Exception('HTTP ${response.statusCode}: $bodyPreview');
-      }
-
-      final decoded =
-          jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-      final data =
-          (decoded['data'] ?? decoded['models']) as List<dynamic>? ?? [];
-      final ids = data
-          .map((item) {
-            final map = item as Map<String, dynamic>;
-            return (map['id'] ?? map['name'] ?? '').toString();
-          })
-          .where((id) => id.isNotEmpty)
-          .map((id) => id.startsWith('models/') ? id.substring(7) : id)
-          .toSet()
-          .toList()
-        ..sort();
-
-      for (final selected in _selectedModels.reversed) {
-        if (selected.isNotEmpty && !ids.contains(selected)) {
-          ids.insert(0, selected);
-        }
-      }
-
-      if (!mounted) return;
-      setState(() {
-        _availableModels = ids;
-        if (ids.isEmpty) {
-          _modelsError = 'Список моделей пуст — введи имя модели вручную';
-        }
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _modelsError = 'Ошибка загрузки ($e)';
-      });
-    } finally {
-      if (mounted) {
-        setState(() => _loadingModels = false);
-      }
-    }
-  }
-
   Future<void> _save() async {
-    final primary = _modelCtrl.text.trim().isEmpty
-        ? 'openai/gpt-oss-120b'
-        : _modelCtrl.text.trim();
-
-    final fallbacks = _selectedModels
-        .where((m) => m.trim().isNotEmpty && m.trim() != primary)
+    final fallbacks = _fallbacksController.text
+        .split(',')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
         .toList();
 
     final updated = TranslatorSettings(
-      endpointUrl: _endpointCtrl.text.trim().isEmpty
-          ? 'https://api.groq.com/openai/v1/chat/completions'
-          : _endpointCtrl.text.trim(),
-      apiKey: _apiKeyCtrl.text.trim(),
-      model: primary,
+      engineMode: _engineMode,
+      endpointUrl: _endpointController.text.trim(),
+      apiKey: _apiKeyController.text.trim(),
+      model: _modelController.text.trim(),
       fallbackModels: fallbacks,
-      autoSwitchModels: _autoSwitchModels,
-      targetLanguage: _langCtrl.text.trim().isEmpty
-          ? 'русский'
-          : _langCtrl.text.trim(),
+      targetLanguage: _langController.text.trim().isEmpty
+          ? 'Russian'
+          : _langController.text.trim(),
     );
-    await SettingsService().saveSettings(updated);
+    await _settingsService.saveSettings(updated);
     if (!mounted) return;
     Navigator.of(context).pop(updated);
   }
 
   @override
   Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
+    final hasKey = _apiKeyController.text.trim().isNotEmpty;
+
     return Scaffold(
-      appBar: AppBar(title: const Text('Настройки переводчика')),
+      appBar: AppBar(
+        title: const Text('Настройки переводчика'),
+        actions: [
+          TextButton(
+            onPressed: _save,
+            child: const Text(
+              'Сохранить',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          const Text(
-            'Быстрый выбор сервиса:',
-            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 6,
-            children: _presets.map((preset) {
-              final active = _endpointCtrl.text.trim() == preset.endpoint;
-              return ChoiceChip(
-                label: Text(preset.label),
-                selected: active,
-                onSelected: (_) => _applyPreset(preset),
-              );
-            }).toList(),
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _endpointCtrl,
-            onChanged: (_) => setState(() {}),
-            decoration: const InputDecoration(
-              labelText: 'Endpoint URL',
-              border: OutlineInputBorder(),
-            ),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _apiKeyCtrl,
-            obscureText: _obscureKey,
-            decoration: InputDecoration(
-              labelText: 'API Key',
-              border: const OutlineInputBorder(),
-              suffixIcon: IconButton(
-                icon: Icon(
-                  _obscureKey ? Icons.visibility : Icons.visibility_off,
-                ),
-                onPressed: () => setState(() => _obscureKey = !_obscureKey),
+          // БЛОК 1: Вход в 1 клик (OpenRouter OAuth)
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.bolt, color: accent),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'Быстрое подключение в 1 клик',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      if (hasKey &&
+                          _engineMode ==
+                              TranslationEngineMode.oneClickOpenRouter)
+                        const Icon(
+                          Icons.check_circle,
+                          color: Colors.greenAccent,
+                          size: 20,
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Откроется окно входа OpenRouter. Если у вас ещё нет аккаунта — войдите через Google, ключ создастся автоматически. Если аккаунт уже есть и ключ ранее создавался — просто подтвердите доступ, ключ подтянется сам.',
+                    style: TextStyle(fontSize: 13, color: Color(0xFFA89E93)),
+                  ),
+                  const SizedBox(height: 14),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed:
+                          _authInProgress ? null : _startOpenRouterOneClickAuth,
+                      icon: _authInProgress
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.login),
+                      label: Text(
+                        hasKey
+                            ? 'Переподключить / Обновить ключ (1 клик)'
+                            : 'Подключить в 1 клик (OpenRouter)',
+                      ),
+                    ),
+                  ),
+                  if (hasKey) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      'Ключ активен: ${_apiKeyController.text.substring(0, _apiKeyController.text.length.clamp(0, 10))}...',
+                      style: TextStyle(fontSize: 12, color: accent),
+                    ),
+                  ],
+                ],
               ),
             ),
           ),
+
           const SizedBox(height: 12),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Автопереключение моделей при лимитах'),
-            subtitle: const Text(
-              'Если у одной модели закончится квота, очередь сама переключится на следующую отмеченную',
-              style: TextStyle(fontSize: 12),
+
+          // БЛОК 2: Встроенный офлайн-переводчик (Google ML Kit)
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.offline_pin_outlined, color: accent),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'Встроенный офлайн-переводчик',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      Switch(
+                        activeColor: accent,
+                        value:
+                            _engineMode == TranslationEngineMode.offlineLocal,
+                        onChanged: (val) async {
+                          if (val) {
+                            setState(() {
+                              _engineMode = TranslationEngineMode.offlineLocal;
+                            });
+                            if (!_offlineModelReady) {
+                              await _downloadOfflineModel();
+                            }
+                          } else {
+                            setState(() {
+                              _engineMode =
+                                  TranslationEngineMode.oneClickOpenRouter;
+                            });
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Работает вообще без интернета, ключей и VPN. Скачивает языковую модель (~30 МБ) один раз прямо в телефон.',
+                    style: TextStyle(fontSize: 13, color: Color(0xFFA89E93)),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _offlineModelReady
+                              ? 'Статус: языковая модель загружена'
+                              : 'Статус: модель ещё не загружена',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: _offlineModelReady
+                                ? Colors.greenAccent
+                                : const Color(0xFFA89E93),
+                          ),
+                        ),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: _downloadingOfflineModel
+                            ? null
+                            : _downloadOfflineModel,
+                        icon: _downloadingOfflineModel
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.download, size: 18),
+                        label: Text(
+                          _offlineModelReady ? 'Проверить' : 'Скачать модель',
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
-            value: _autoSwitchModels,
-            onChanged: (val) {
-              setState(() {
-                _autoSwitchModels = val;
-                if (!val && _selectedModels.isNotEmpty) {
-                  _selectedModels = [_selectedModels.first];
-                  _modelCtrl.text = _selectedModels.first;
-                }
-              });
-            },
           ),
-          const SizedBox(height: 8),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _modelCtrl,
-                  onChanged: (val) {
-                    final clean = val.trim();
-                    if (clean.isNotEmpty) {
-                      setState(() {
-                        if (_selectedModels.isEmpty) {
-                          _selectedModels = [clean];
-                        } else {
-                          _selectedModels[0] = clean;
-                        }
-                      });
-                    }
-                  },
-                  decoration: const InputDecoration(
-                    labelText: 'Основная модель',
-                    border: OutlineInputBorder(),
+
+          const SizedBox(height: 12),
+
+          // БЛОК 3: Язык перевода
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: TextField(
+                controller: _langController,
+                onChanged: (_) => _checkOfflineModel(),
+                decoration: const InputDecoration(
+                  labelText: 'Язык перевода',
+                  hintText: 'Russian',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 12),
+
+          // БЛОК 4: Для продвинутых пользователей (ручной ввод API)
+          Card(
+            child: ExpansionTile(
+              initiallyExpanded: _advancedExpanded,
+              onExpansionChanged: (v) => setState(() => _advancedExpanded = v),
+              leading: Icon(Icons.tune, color: accent),
+              title: const Text(
+                'Для продвинутых пользователей',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
+              subtitle: const Text(
+                'Ручной ввод API Key, Endpoint и списка моделей (Groq, OpenRouter, Gemini)',
+                style: TextStyle(fontSize: 12, color: Color(0xFFA89E93)),
+              ),
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Wrap(
+                        spacing: 8,
+                        children: [
+                          ActionChip(
+                            label: const Text('Groq Free'),
+                            onPressed: () {
+                              setState(() {
+                                _engineMode = TranslationEngineMode.customApi;
+                                _endpointController.text =
+                                    'https://api.groq.com/openai/v1/chat/completions';
+                                _modelController.text =
+                                    'llama-3.3-70b-versatile';
+                                _fallbacksController.text =
+                                    'openai/gpt-oss-120b, openai/gpt-oss-20b, meta-llama/llama-4-scout-17b-16e-instruct';
+                              });
+                            },
+                          ),
+                          ActionChip(
+                            label: const Text('OpenRouter Free'),
+                            onPressed: () {
+                              setState(() {
+                                _engineMode = TranslationEngineMode.customApi;
+                                _endpointController.text =
+                                    'https://openrouter.ai/api/v1/chat/completions';
+                                _modelController.text =
+                                    'meta-llama/llama-3.3-70b-instruct:free';
+                                _fallbacksController.text =
+                                    'google/gemma-3-27b-it:free, mistralai/mistral-small-3.1-24b-instruct:free';
+                              });
+                            },
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _endpointController,
+                        onChanged: (_) => _engineMode =
+                            TranslationEngineMode.customApi,
+                        decoration: const InputDecoration(
+                          labelText: 'API Endpoint URL',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _apiKeyController,
+                        obscureText: _obscureKey,
+                        onChanged: (_) => _engineMode =
+                            TranslationEngineMode.customApi,
+                        decoration: InputDecoration(
+                          labelText: 'API Key',
+                          border: const OutlineInputBorder(),
+                          suffixIcon: IconButton(
+                            icon: Icon(
+                              _obscureKey
+                                  ? Icons.visibility
+                                  : Icons.visibility_off,
+                            ),
+                            onPressed: () =>
+                                setState(() => _obscureKey = !_obscureKey),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _modelController,
+                        decoration: const InputDecoration(
+                          labelText: 'Основная модель',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _fallbacksController,
+                        maxLines: 2,
+                        decoration: const InputDecoration(
+                          labelText: 'Резервные модели (через запятую)',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              SizedBox(
-                height: 56,
-                child: OutlinedButton.icon(
-                  onPressed: _loadingModels ? null : _fetchModels,
-                  icon: _loadingModels
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.download),
-                  label: const Text('Список'),
-                ),
-              ),
-            ],
-          ),
-          if (_modelsError != null) ...[
-            const SizedBox(height: 6),
-            Text(
-              _modelsError!,
-              style: const TextStyle(fontSize: 12, color: Colors.amber),
-            ),
-          ],
-          if (_availableModels.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            Text(
-              _autoSwitchModels
-                  ? 'Выбери модели для ротации (${_selectedModels.length} в пуле):'
-                  : 'Выбери модель:',
-              style: const TextStyle(fontSize: 12, color: Colors.grey),
-            ),
-            const SizedBox(height: 6),
-            Wrap(
-              spacing: 8,
-              runSpacing: 6,
-              children: _availableModels.map((modelName) {
-                final idx = _selectedModels.indexOf(modelName);
-                final isSelected = idx != -1;
-                final label = isSelected && _autoSwitchModels
-                    ? '${idx + 1}. $modelName'
-                    : modelName;
-                return FilterChip(
-                  label: Text(label),
-                  selected: isSelected,
-                  onSelected: (_) => _toggleModelSelection(modelName),
-                );
-              }).toList(),
-            ),
-          ],
-          const SizedBox(height: 12),
-          TextField(
-            controller: _langCtrl,
-            decoration: const InputDecoration(
-              labelText: 'Язык перевода',
-              border: OutlineInputBorder(),
+              ],
             ),
           ),
+
           const SizedBox(height: 20),
           FilledButton.icon(
             onPressed: _save,
             icon: const Icon(Icons.save),
-            label: const Text('Сохранить'),
+            label: const Text('Сохранить настройки'),
           ),
         ],
       ),
