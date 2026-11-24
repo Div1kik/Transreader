@@ -27,12 +27,12 @@ jobs:
           cache: true
 
       - name: Create Android platform files
-        run: flutter create . --platforms=android --project-name transreader
+        run: flutter create . --platforms=android
 
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Configure AndroidManifest (Name, Internet, Impeller)
+      - name: Configure AndroidManifest (Name, Internet, Impeller, AppLink)
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST" ]; then
@@ -42,6 +42,9 @@ jobs:
             fi
             if ! grep -q "EnableImpeller" "$MANIFEST"; then
               sed -i 's|</application>|    <meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false" />\n    </application>|' "$MANIFEST"
+            fi
+            if ! grep -q 'android:host="transreader.app"' "$MANIFEST"; then
+              sed -i 's|</activity>|    <intent-filter>\n                <action android:name="android.intent.action.VIEW" />\n                <category android:name="android.intent.category.DEFAULT" />\n                <category android:name="android.intent.category.BROWSABLE" />\n                <data android:scheme="https" android:host="transreader.app" android:pathPrefix="/callback" />\n            </intent-filter>\n        </activity>|' "$MANIFEST"
             fi
           fi
 
