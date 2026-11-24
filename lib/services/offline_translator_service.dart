@@ -39,11 +39,23 @@ class OfflineTranslatorService {
     String targetLanguage = 'Russian',
   }) async {
     final target = _mapTargetLang(targetLanguage);
+
     if (!await _modelManager.isModelDownloaded(source.bcpCode)) {
-      await _modelManager.downloadModel(source.bcpCode);
+      final okSource = await _modelManager
+          .downloadModel(source.bcpCode, isWifiRequired: false)
+          .timeout(const Duration(seconds: 90));
+      if (!okSource) {
+        throw Exception('Не удалось скачать базовый пакет (${source.bcpCode})');
+      }
     }
+
     if (!await _modelManager.isModelDownloaded(target.bcpCode)) {
-      await _modelManager.downloadModel(target.bcpCode);
+      final okTarget = await _modelManager
+          .downloadModel(target.bcpCode, isWifiRequired: false)
+          .timeout(const Duration(seconds: 90));
+      if (!okTarget) {
+        throw Exception('Не удалось скачать языковой пакет (${target.bcpCode})');
+      }
     }
   }
 
