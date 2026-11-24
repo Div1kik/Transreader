@@ -1,7 +1,7 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
 enum TranslationEngineMode {
-  oneClickOpenRouter,
+  groqCloud,
   offlineLocal,
   customApi,
 }
@@ -15,14 +15,14 @@ class TranslatorSettings {
   final String targetLanguage;
 
   const TranslatorSettings({
-    this.engineMode = TranslationEngineMode.oneClickOpenRouter,
-    this.endpointUrl = 'https://openrouter.ai/api/v1/chat/completions',
+    this.engineMode = TranslationEngineMode.groqCloud,
+    this.endpointUrl = 'https://api.groq.com/openai/v1/chat/completions',
     this.apiKey = '',
-    this.model = 'meta-llama/llama-3.3-70b-instruct:free',
+    this.model = 'llama-3.3-70b-versatile',
     this.fallbackModels = const [
-      'google/gemma-3-27b-it:free',
-      'mistralai/mistral-small-3.1-24b-instruct:free',
-      'qwen/qwen-2.5-72b-instruct:free',
+      'openai/gpt-oss-120b',
+      'openai/gpt-oss-20b',
+      'meta-llama/llama-4-scout-17b-16e-instruct',
     ],
     this.targetLanguage = 'Russian',
   });
@@ -69,22 +69,32 @@ class SettingsService {
 
   Future<TranslatorSettings> loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    final modeIdx = prefs.getInt(_kEngineMode) ??
-        TranslationEngineMode.oneClickOpenRouter.index;
+    final modeIdx =
+        prefs.getInt(_kEngineMode) ?? TranslationEngineMode.groqCloud.index;
+
+    final savedEndpoint = prefs.getString(_kEndpoint) ?? '';
+    final effectiveEndpoint = savedEndpoint.isEmpty ||
+            savedEndpoint.contains('openrouter.ai')
+        ? 'https://api.groq.com/openai/v1/chat/completions'
+        : savedEndpoint;
+
+    final savedModel = prefs.getString(_kModel) ?? '';
+    final effectiveModel =
+        savedModel.isEmpty || savedModel.contains(':free')
+            ? 'llama-3.3-70b-versatile'
+            : savedModel;
 
     return TranslatorSettings(
       engineMode: TranslationEngineMode
           .values[modeIdx.clamp(0, TranslationEngineMode.values.length - 1)],
-      endpointUrl: prefs.getString(_kEndpoint) ??
-          'https://openrouter.ai/api/v1/chat/completions',
+      endpointUrl: effectiveEndpoint,
       apiKey: prefs.getString(_kApiKey) ?? '',
-      model:
-          prefs.getString(_kModel) ?? 'meta-llama/llama-3.3-70b-instruct:free',
+      model: effectiveModel,
       fallbackModels: prefs.getStringList(_kFallbacks) ??
           const [
-            'google/gemma-3-27b-it:free',
-            'mistralai/mistral-small-3.1-24b-instruct:free',
-            'qwen/qwen-2.5-72b-instruct:free',
+            'openai/gpt-oss-120b',
+            'openai/gpt-oss-20b',
+            'meta-llama/llama-4-scout-17b-16e-instruct',
           ],
       targetLanguage: prefs.getString(_kLang) ?? 'Russian',
     );
