@@ -32,20 +32,16 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Configure AndroidManifest (Name, Internet, Impeller, SingleTask, DeepLink)
+      - name: Configure AndroidManifest (Name, Internet, Impeller)
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST" ]; then
             sed -i 's/android:label="[^"]*"/android:label="TransReader"/g' "$MANIFEST"
-            sed -i 's/android:launchMode="singleTop"/android:launchMode="singleTask"/g' "$MANIFEST"
             if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
               sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$MANIFEST"
             fi
             if ! grep -q "EnableImpeller" "$MANIFEST"; then
               sed -i 's|</application>|    <meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false" />\n    </application>|' "$MANIFEST"
-            fi
-            if ! grep -q 'android:scheme="transreader"' "$MANIFEST"; then
-              sed -i 's|</activity>|    <intent-filter>\n                <action android:name="android.intent.action.VIEW" />\n                <category android:name="android.intent.category.DEFAULT" />\n                <category android:name="android.intent.category.BROWSABLE" />\n                <data android:scheme="transreader" android:host="callback" />\n            </intent-filter>\n        </activity>|' "$MANIFEST"
             fi
           fi
 
