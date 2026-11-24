@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
-import 'package:app_links/app_links.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -39,7 +39,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _backupBusy = false;
 
   String? _pkceCodeVerifier;
-  StreamSubscription<Uri>? _linkSub;
+  HttpServer? _localCallbackServer;
 
   @override
   void initState() {
@@ -59,7 +59,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     _advancedExpanded = _engineMode == TranslationEngineMode.customApi;
     _checkOfflineModel();
-    _listenDeepLinks();
   }
 
   Future<void> _checkOfflineModel() async {
@@ -71,18 +70,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (mounted) {
       setState(() => _offlineModelReady = ready);
     }
-  }
-
-  void _listenDeepLinks() {
-    final appLinks = AppLinks();
-    _linkSub = appLinks.uriLinkStream.listen((uri) async {
-      if (uri.scheme == 'transreader' && uri.host == 'callback') {
-        final code = uri.queryParameters['code'];
-        if (code != null && code.isNotEmpty) {
-          await _exchangeOpenRouterCode(code);
-        }
-      }
-    });
   }
 
   String _generateCodeVerifier() {
@@ -101,12 +88,55 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _startOpenRouterOneClickAuth() async {
     setState(() => _authInProgress = true);
     try {
+      await _localCallbackServer?.close(force: true);
+
+      // Поднимаем локальный HTTP-сервер на свободном порту localhost,
+      // так как OpenRouter OAuth официально принимает callback_url вида http://localhost:<port>
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      _localCallbackServer = server;
+      final port = server.port;
+
       final verifier = _generateCodeVerifier();
       final challenge = _generateCodeChallenge(verifier);
       _pkceCodeVerifier = verifier;
 
+      // Слушаем возврат из браузера с параметром ?code=...
+      server.listen((HttpRequest request) async {
+        final code = request.uri.queryParameters['code'];
+        request.response
+          ..statusCode = HttpStatus.ok
+          ..headers.contentType = ContentType.html
+          ..write('''
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TransReader</title>
+<style>
+  body { background:#191613; color:#F3ECE4; font-family:sans-serif; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; text-align:center; padding:20px; }
+  .card { background:#241F1B; border:1px solid #D98A3C; border-radius:16px; padding:24px; max-width:360px; }
+  h2 { color:#D98A3C; margin-top:0; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h2>Готово!</h2>
+    <p>Ключ передан в TransReader. Можете закрыть эту вкладку и вернуться в приложение.</p>
+  </div>
+</body>
+</html>
+''');
+        await request.response.close();
+
+        if (code != null && code.isNotEmpty) {
+          await server.close(force: true);
+          _localCallbackServer = null;
+          await _exchangeOpenRouterCode(code);
+        }
+      });
+
+      final callbackUrl = 'http://localhost:$port/callback';
       final authUri = Uri.https('openrouter.ai', '/auth', {
-        'callback_url': 'transreader://callback',
+        'callback_url': callbackUrl,
         'code_challenge': challenge,
         'code_challenge_method': 'S256',
       });
@@ -191,8 +221,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content:
-              Text('Офлайн-модель скачана! Теперь можно переводить без интернета.'),
+          content: Text(
+              'Офлайн-модель скачана! Теперь можно переводить без интернета.'),
         ),
       );
     } catch (e) {
@@ -253,7 +283,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
-    _linkSub?.cancel();
+    _localCallbackServer?.close(force: true);
     _endpointController.dispose();
     _apiKeyController.dispose();
     _modelController.dispose();
