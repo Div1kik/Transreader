@@ -5,6 +5,7 @@ import 'package:app_links/app_links.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../db/book_database.dart';
 import '../services/offline_translator_service.dart';
@@ -35,14 +36,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _advancedExpanded = false;
   bool _authInProgress = false;
   bool _downloadingOfflineModel = false;
+  String? _offlineStatusStep;
   bool _offlineModelReady = false;
   bool _backupBusy = false;
 
-  String? _pkceCodeVerifier;
   String? _lastHandledCode;
   StreamSubscription<Uri>? _linkSub;
 
   static const String _callbackUrl = 'https://div1kik.github.io/Transreader/';
+  static const String _kPendingVerifier = 'pkce_pending_code_verifier';
 
   @override
   void initState() {
@@ -111,7 +113,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final verifier = _generateCodeVerifier();
       final challenge = _generateCodeChallenge(verifier);
-      _pkceCodeVerifier = verifier;
+
+      // Сохраняем verifier на диск, чтобы он не потерялся даже при перезапуске экрана
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kPendingVerifier, verifier);
 
       final authUri = Uri.https('openrouter.ai', '/auth', {
         'callback_url': _callbackUrl,
@@ -137,18 +142,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _exchangeOpenRouterCode(String code) async {
     try {
+      final prefs = await SharedPreferences.getInstance();
+      final verifier = prefs.getString(_kPendingVerifier) ?? '';
+
       final response = await http.post(
         Uri.parse('https://openrouter.ai/api/v1/auth/keys'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'code': code,
-          'code_verifier': _pkceCodeVerifier ?? '',
+          'code_verifier': verifier,
           'code_challenge_method': 'S256',
         }),
       );
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw Exception('Ошибка получения ключа (${response.statusCode})');
+        throw Exception(
+          'Ошибка получения ключа (${response.statusCode}): ${response.body}',
+        );
       }
 
       final data = jsonDecode(response.body);
@@ -156,6 +166,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (receivedKey.isEmpty) {
         throw Exception('Сервер не вернул ключ');
       }
+
+      await prefs.remove(_kPendingVerifier);
 
       if (!mounted) return;
       setState(() {
@@ -185,16 +197,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _downloadOfflineModel() async {
-    setState(() => _downloadingOfflineModel = true);
+    setState(() {
+      _downloadingOfflineModel = true;
+      _offlineStatusStep = 'Подготовка загрузки...';
+    });
     try {
       await OfflineTranslatorService.instance.downloadLanguagePair(
         targetLanguage: _langController.text.trim().isEmpty
             ? 'Russian'
             : _langController.text.trim(),
+        onProgress: (step) {
+          if (mounted) setState(() => _offlineStatusStep = step);
+        },
       );
       if (!mounted) return;
       setState(() {
         _offlineModelReady = true;
+        _offlineStatusStep = null;
         _engineMode = TranslationEngineMode.offlineLocal;
       });
       ScaffoldMessenger.of(context).showSnackBar(
@@ -205,8 +224,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
     } catch (e) {
       if (!mounted) return;
+      setState(() => _offlineStatusStep = null);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка загрузки офлайн-модели: $e')),
+        SnackBar(
+          duration: const Duration(seconds: 6),
+          content: Text(e.toString().replaceFirst('Exception: ', '')),
+        ),
       );
     } finally {
       if (mounted) {
@@ -345,7 +368,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   const SizedBox(height: 8),
                   const Text(
-                    'Откроется окно входа OpenRouter. Если у вас ещё нет аккаунта — войдите через Google, ключ создастся автоматически. Если аккаунт уже есть и ключ ранее создавался — просто подтвердите доступ, ключ подтянется сам.',
+                    'Откроется окно входа OpenRouter. Войдите через Google и нажмите кнопку подтверждения (Open App) — ключ создастся и подтянется в приложение автоматически.',
                     style: TextStyle(fontSize: 13, color: Color(0xFFA89E93)),
                   ),
                   const SizedBox(height: 14),
@@ -434,14 +457,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     children: [
                       Expanded(
                         child: Text(
-                          _offlineModelReady
-                              ? 'Статус: языковая модель загружена'
-                              : 'Статус: модель ещё не загружена',
+                          _offlineStatusStep ??
+                              (_offlineModelReady
+                                  ? 'Статус: языковая модель загружена'
+                                  : 'Статус: модель ещё не загружена'),
                           style: TextStyle(
                             fontSize: 12,
-                            color: _offlineModelReady
-                                ? Colors.greenAccent
-                                : const Color(0xFFA89E93),
+                            color: _offlineStatusStep != null
+                                ? accent
+                                : _offlineModelReady
+                                    ? Colors.greenAccent
+                                    : const Color(0xFFA89E93),
                           ),
                         ),
                       ),
