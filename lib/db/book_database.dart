@@ -1,3 +1,5 @@
+import 'dart:io';
+import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart';
 import 'package:sqflite/sqflite.dart';
 import '../models/book_models.dart';
@@ -8,10 +10,14 @@ class BookDatabase {
 
   Database? _db;
 
-  Future<Database> get database async {
-    if (_db != null) return _db!;
+  Future<String> getDatabaseFilePath() async {
     final dbPath = await getDatabasesPath();
-    final path = join(dbPath, 'transreader_books.db');
+    return join(dbPath, 'transreader_books.db');
+  }
+
+  Future<Database> get database async {
+    if (_db != null && _db!.isOpen) return _db!;
+    final path = await getDatabaseFilePath();
     _db = await openDatabase(
       path,
       version: 1,
@@ -52,6 +58,74 @@ class BookDatabase {
       },
     );
     return _db!;
+  }
+
+  /// Экспортирует текущую базу книг и переводов в выбранную папку на устройстве
+  Future<String?> exportBackup() async {
+    // Гарантируем, что база инициализирована и сброшена на диск
+    final db = await database;
+    await db.rawQuery('PRAGMA wal_checkpoint(FULL)');
+
+    final sourcePath = await getDatabaseFilePath();
+    final sourceFile = File(sourcePath);
+    if (!await sourceFile.exists()) {
+      throw Exception('Файл библиотеки ещё не создан');
+    }
+
+    final bytes = await sourceFile.readAsBytes();
+    final now = DateTime.now();
+    final stamp =
+        '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+
+    final savedPath = await FilePicker.platform.saveFile(
+      dialogTitle: 'Сохранить резервную копию книг',
+      fileName: 'TransReader_backup_$stamp.db',
+      bytes: bytes,
+    );
+
+    return savedPath;
+  }
+
+  /// Восстанавливает библиотеку и переводы из выбранного .db файла
+  Future<bool> importBackup() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.any,
+      withData: true,
+    );
+    if (result == null || result.files.isEmpty) return false;
+
+    final file = result.files.first;
+    final bytes = file.bytes ??
+        (file.path != null ? await File(file.path!).readAsBytes() : null);
+
+    if (bytes == null || bytes.length < 16) {
+      throw Exception('Выбран пустой или повреждённый файл');
+    }
+
+    // Проверяем стандартный заголовок SQLite ("SQLite format 3\0")
+    final header = String.fromCharCodes(bytes.take(15));
+    if (header != 'SQLite format 3') {
+      throw Exception('Этот файл не является резервной копией TransReader (.db)');
+    }
+
+    if (_db != null && _db!.isOpen) {
+      await _db!.close();
+      _db = null;
+    }
+
+    final targetPath = await getDatabaseFilePath();
+    // Удаляем возможные journal/wal хвосты старой базы
+    for (final suffix in ['', '-wal', '-shm', '-journal']) {
+      final f = File('$targetPath$suffix');
+      if (await f.exists()) {
+        await f.delete();
+      }
+    }
+
+    await File(targetPath).writeAsBytes(bytes, flush: true);
+    // Переоткрываем восстановленную базу
+    await database;
+    return true;
   }
 
   Future<void> insertBookWithChapters(
