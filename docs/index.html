@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TransReader — Подключение</title>
+  <style>
+    body {
+      background: #191613;
+      color: #F3ECE4;
+      font-family: sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+      text-align: center;
+      padding: 20px;
+    }
+    .card {
+      background: #241F1B;
+      border: 1px solid #D98A3C;
+      border-radius: 16px;
+      padding: 24px;
+      max-width: 360px;
+    }
+    h2 { color: #D98A3C; margin-top: 0; }
+    a.btn {
+      display: inline-block;
+      margin-top: 16px;
+      background: #D98A3C;
+      color: #191613;
+      font-weight: bold;
+      text-decoration: none;
+      padding: 12px 20px;
+      border-radius: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Ключ получен!</h2>
+    <p>Возвращаем вас в TransReader...</p>
+    <a id="openBtn" class="btn" href="#">Открыть TransReader</a>
+  </div>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code');
+    if (code) {
+      const deepLink = 'transreader://callback?code=' + encodeURIComponent(code);
+      document.getElementById('openBtn').href = deepLink;
+      window.location.replace(deepLink);
+    }
+  </script>
+</body>
+</html>
