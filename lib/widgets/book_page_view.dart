@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import '../models/book_models.dart';
 import '../models/reader_theme_settings.dart';
 
@@ -24,6 +26,7 @@ class BookPageView extends StatefulWidget {
   final VoidCallback? onPrevChapter;
   final VoidCallback? onCenterTap;
   final VoidCallback onTranslateHere;
+  final ValueChanged<String> onTranslateSelection;
 
   const BookPageView({
     super.key,
@@ -37,6 +40,7 @@ class BookPageView extends StatefulWidget {
     this.onPrevChapter,
     this.onCenterTap,
     required this.onTranslateHere,
+    required this.onTranslateSelection,
   });
 
   @override
@@ -51,8 +55,13 @@ class _BookPageViewState extends State<BookPageView>
   String? _lastLayoutSignature;
 
   late final AnimationController _curlController;
-  double _dragProgress = 0.0; // -1.0 (назад) .. 0.0 .. +1.0 (вперёд)
+  double _dragProgress = 0.0;
   bool _isDragging = false;
+
+  // Контроль быстрого тапа, чтобы долгое зажатие для выделения не листало страницы
+  DateTime? _tapDownTime;
+  Offset? _tapDownPos;
+  String _selectedText = '';
 
   @override
   void initState() {
@@ -60,7 +69,7 @@ class _BookPageViewState extends State<BookPageView>
     _currentPage = widget.initialPage;
     _curlController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 380),
+      duration: const Duration(milliseconds: 360),
       lowerBound: -1.0,
       upperBound: 1.0,
       value: 0.0,
@@ -77,34 +86,39 @@ class _BookPageViewState extends State<BookPageView>
     super.dispose();
   }
 
-  String _buildSignature(Size size) {
+  String _buildSignature(Size size, TextScaler textScaler) {
     return '${size.width.toInt()}x${size.height.toInt()}_'
+        '${textScaler.scale(10)}_'
         '${widget.chapterTitle}_'
         '${widget.paragraphs.length}_'
         '${widget.paragraphs.where((p) => p.isTranslated).length}_'
         '${widget.appearance.fontSize}_'
         '${widget.appearance.lineHeight}_'
-        '${widget.appearance.showOriginal}';
+        '${widget.appearance.textDisplay.index}';
   }
 
-  List<BookPageSlice> _paginate(BoxConstraints constraints) {
+  List<BookPageSlice> _paginate(
+    BoxConstraints constraints,
+    TextScaler textScaler,
+  ) {
     const horizontalPadding = 20.0;
-    const verticalPadding = 16.0;
-    const footerHeight = 28.0;
+    const verticalPadding = 28.0; // верхний отступ + нижний отступ над колонтитулом
+    const footerHeight = 36.0; // высота строки главы и номера страницы + зазор
 
     final availableWidth =
         (constraints.maxWidth - horizontalPadding * 2).clamp(120.0, 2000.0);
+    // Оставляем дополнительный запас 24px, чтобы текст никогда не касался колонтитула
     final availableHeight =
-        (constraints.maxHeight - verticalPadding * 2 - footerHeight)
-            .clamp(160.0, 4000.0);
+        (constraints.maxHeight - verticalPadding - footerHeight - 24.0)
+            .clamp(140.0, 4000.0);
 
     final mainStyle = TextStyle(
       fontSize: widget.appearance.fontSize,
       height: widget.appearance.lineHeight,
     );
     final origStyle = TextStyle(
-      fontSize: (widget.appearance.fontSize - 4).clamp(11.0, 24.0),
-      height: 1.35,
+      fontSize: (widget.appearance.fontSize - 3.5).clamp(11.0, 24.0),
+      height: 1.38,
       fontStyle: FontStyle.italic,
     );
     final headerStyle = TextStyle(
@@ -117,8 +131,9 @@ class _BookPageViewState extends State<BookPageView>
       final tp = TextPainter(
         text: TextSpan(text: text, style: style),
         textDirection: TextDirection.ltr,
+        textScaler: textScaler,
       )..layout(maxWidth: availableWidth);
-      return tp.height;
+      return tp.height + 4.0;
     }
 
     final result = <BookPageSlice>[];
@@ -129,14 +144,17 @@ class _BookPageViewState extends State<BookPageView>
         measureTextHeight(widget.chapterTitle, headerStyle) + 18.0;
 
     for (final p in widget.paragraphs) {
-      final textToShow = p.isTranslated ? p.translatedText! : p.sourceText;
-      double itemHeight = measureTextHeight(textToShow, mainStyle) + 14.0;
+      double itemHeight = 14.0;
 
-      if (widget.appearance.showOriginal && p.isTranslated) {
-        itemHeight += measureTextHeight(p.sourceText, origStyle) + 6.0;
-      }
-      if (!p.isTranslated) {
-        itemHeight += 28.0;
+      if (widget.appearance.isOriginalOnly) {
+        itemHeight += measureTextHeight(p.sourceText, mainStyle);
+      } else if (p.isTranslated) {
+        itemHeight += measureTextHeight(p.translatedText!, mainStyle);
+        if (widget.appearance.showOriginal) {
+          itemHeight += measureTextHeight(p.sourceText, origStyle) + 8.0;
+        }
+      } else {
+        itemHeight += measureTextHeight(p.sourceText, mainStyle) + 30.0;
       }
 
       if (usedHeight + itemHeight > availableHeight &&
@@ -181,6 +199,7 @@ class _BookPageViewState extends State<BookPageView>
       _currentPage = target;
       _dragProgress = 0.0;
       _curlController.value = 0.0;
+      _selectedText = '';
     });
     widget.onPageChanged?.call(_currentPage);
   }
@@ -246,145 +265,191 @@ class _BookPageViewState extends State<BookPageView>
       width: double.infinity,
       height: double.infinity,
       color: widget.palette.background,
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 10),
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Область текста с защитной прокруткой, если абзац очень длинный
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (slice.chapterHeader != null)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 16),
-                    child: Text(
-                      slice.chapterHeader!,
-                      style: TextStyle(
-                        fontSize: widget.appearance.fontSize + 5,
-                        fontWeight: FontWeight.bold,
-                        height: 1.3,
-                        color: widget.palette.text,
+            child: SelectionArea(
+              onSelectionChanged: (SelectedContent? content) {
+                _selectedText = content?.plainText ?? '';
+              },
+              contextMenuBuilder: (context, selectableRegionState) {
+                final items = <ContextMenuButtonItem>[
+                  ...selectableRegionState.contextMenuButtonItems,
+                  if (_selectedText.trim().isNotEmpty)
+                    ContextMenuButtonItem(
+                      label: 'Перевести',
+                      onPressed: () {
+                        final toTranslate = _selectedText.trim();
+                        selectableRegionState.hideToolbar();
+                        widget.onTranslateSelection(toTranslate);
+                      },
+                    ),
+                ];
+                return AdaptiveTextSelectionToolbar.buttonItems(
+                  anchors: selectableRegionState.contextMenuAnchors,
+                  buttonItems: items,
+                );
+              },
+              child: SingleChildScrollView(
+                physics: const ClampingScrollPhysics(),
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (slice.chapterHeader != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: Text(
+                          slice.chapterHeader!,
+                          style: TextStyle(
+                            fontSize: widget.appearance.fontSize + 5,
+                            fontWeight: FontWeight.bold,
+                            height: 1.3,
+                            color: widget.palette.text,
+                          ),
+                        ),
                       ),
-                    ),
-                  ),
-                for (final p in slice.items)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (p.isTranslated)
-                          Text(
-                            p.translatedText!,
-                            style: TextStyle(
-                              fontSize: widget.appearance.fontSize,
-                              height: widget.appearance.lineHeight,
-                              color: widget.palette.text,
-                            ),
-                          )
-                        else
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                p.sourceText,
-                                style: TextStyle(
-                                  fontSize: widget.appearance.fontSize - 1,
-                                  height: widget.appearance.lineHeight,
-                                  color: widget.palette.secondaryText,
-                                ),
-                              ),
-                              Align(
-                                alignment: Alignment.centerRight,
-                                child: InkWell(
-                                  onTap: widget.onTranslateHere,
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 2,
-                                      horizontal: 6,
-                                    ),
-                                    child: Text(
-                                      'Перевести',
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w600,
-                                        color: widget.palette.accent,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        if (widget.appearance.showOriginal && p.isTranslated) ...[
-                          const SizedBox(height: 4),
-                          Text(
-                            p.sourceText,
-                            style: TextStyle(
-                              fontSize: (widget.appearance.fontSize - 4)
-                                  .clamp(11.0, 24.0),
-                              height: 1.35,
-                              color: widget.palette.secondaryText,
-                              fontStyle: FontStyle.italic,
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-              ],
+                    for (final p in slice.items)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: _buildParagraphBlock(p),
+                      ),
+                  ],
+                ),
+              ),
             ),
           ),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Expanded(
-                child: Text(
-                  widget.chapterTitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: widget.palette.secondaryText.withOpacity(0.75),
+          // Фиксированный нижний колонтитул с чётким отступом сверху
+          Container(
+            padding: const EdgeInsets.only(top: 6),
+            decoration: BoxDecoration(
+              color: widget.palette.background,
+              border: Border(
+                top: BorderSide(
+                  color: widget.palette.secondaryText.withOpacity(0.12),
+                ),
+              ),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Text(
+                    widget.chapterTitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: widget.palette.secondaryText.withOpacity(0.8),
+                    ),
                   ),
                 ),
-              ),
-              Text(
-                'Стр. ${safeIdx + 1} из ${_pages.length}',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w500,
-                  color: widget.palette.secondaryText,
+                const SizedBox(width: 12),
+                Text(
+                  'Стр. ${safeIdx + 1} из ${_pages.length}',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                    color: widget.palette.secondaryText,
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ],
       ),
     );
   }
 
-  /// Естественное перелистывание страницы книги:
-  /// лист приподнимается на читателя (вперёд по Z и лёгкий scale),
-  /// перегибается вдоль корешка в сторону с мягкой тенью и обратной стороной листа.
+  Widget _buildParagraphBlock(ParagraphItem p) {
+    if (widget.appearance.isOriginalOnly) {
+      return Text(
+        p.sourceText,
+        style: TextStyle(
+          fontSize: widget.appearance.fontSize,
+          height: widget.appearance.lineHeight,
+          color: widget.palette.text,
+        ),
+      );
+    }
+
+    if (p.isTranslated) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            p.translatedText!,
+            style: TextStyle(
+              fontSize: widget.appearance.fontSize,
+              height: widget.appearance.lineHeight,
+              color: widget.palette.text,
+            ),
+          ),
+          if (widget.appearance.showOriginal) ...[
+            const SizedBox(height: 5),
+            Text(
+              p.sourceText,
+              style: TextStyle(
+                fontSize: (widget.appearance.fontSize - 3.5).clamp(11.0, 24.0),
+                height: 1.38,
+                color: widget.palette.secondaryText,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          ],
+        ],
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          p.sourceText,
+          style: TextStyle(
+            fontSize: widget.appearance.fontSize - 1,
+            height: widget.appearance.lineHeight,
+            color: widget.palette.secondaryText,
+          ),
+        ),
+        Align(
+          alignment: Alignment.centerRight,
+          child: InkWell(
+            onTap: widget.onTranslateHere,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 6),
+              child: Text(
+                'Перевести',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: widget.palette.accent,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildTurningSheet({
     required Widget pageWidget,
-    required double progress, // 0.0 (лежит плоско) -> 1.0 (перевёрнута влево)
+    required double progress,
     required double width,
   }) {
     final t = progress.clamp(0.0, 1.0);
-    // Угол поворота до ~105 градусов, чтобы лист уходил за левый край экрана
     final angle = t * (math.pi * 0.58);
-    // Лёгкий подъём листа "на себя" в середине движения
     final lift = math.sin(t * math.pi);
     final scale = 1.0 + 0.035 * lift;
-    // Плавный увод корешка влево при завершении переворота
     final slideX = -width * 0.18 * math.pow(t, 1.6);
-
     final isBackSide = angle > (math.pi / 2);
 
     final matrix = Matrix4.identity()
-      ..setEntry(3, 2, 0.00065) // мягкая, неискажающая перспектива
+      ..setEntry(3, 2, 0.00065)
       ..translate(slideX, 0.0, 0.0)
       ..scale(scale, scale, 1.0)
       ..rotateY(angle);
@@ -409,7 +474,6 @@ class _BookPageViewState extends State<BookPageView>
             if (!isBackSide)
               pageWidget
             else
-              // Обратная сторона бумажного листа с лёгким просвечиванием текста
               Container(
                 color: widget.palette.background,
                 child: Opacity(
@@ -421,7 +485,6 @@ class _BookPageViewState extends State<BookPageView>
                   ),
                 ),
               ),
-            // Светотень изгиба бумажного листа
             if (t > 0.01)
               IgnorePointer(
                 child: Container(
@@ -455,12 +518,10 @@ class _BookPageViewState extends State<BookPageView>
       return Stack(
         fit: StackFit.expand,
         children: [
-          // Нижняя страница (следующая)
           if (hasNext)
             _buildSinglePageContent(_currentPage + 1)
           else
             _buildSinglePageContent(_currentPage),
-          // Скользящая тень от верхнего листа на открывающуюся страницу
           if (t > 0.01 && hasNext)
             IgnorePointer(
               child: Container(
@@ -482,7 +543,6 @@ class _BookPageViewState extends State<BookPageView>
                 ),
               ),
             ),
-          // Верхний перелистываемый лист (текущая страница)
           _buildTurningSheet(
             pageWidget: _buildSinglePageContent(_currentPage),
             progress: t,
@@ -497,7 +557,6 @@ class _BookPageViewState extends State<BookPageView>
       return Stack(
         fit: StackFit.expand,
         children: [
-          // Текущая страница остаётся снизу
           _buildSinglePageContent(_currentPage),
           if (t > 0.01 && hasPrev)
             IgnorePointer(
@@ -505,7 +564,6 @@ class _BookPageViewState extends State<BookPageView>
                 color: Colors.black.withOpacity(0.22 * (1.0 - t)),
               ),
             ),
-          // Предыдущая страница возвращается справа налево на место (progress: 1.0 -> 0.0)
           if (hasPrev)
             _buildTurningSheet(
               pageWidget: _buildSinglePageContent(_currentPage - 1),
@@ -519,15 +577,17 @@ class _BookPageViewState extends State<BookPageView>
 
   @override
   Widget build(BuildContext context) {
+    final textScaler = MediaQuery.textScalerOf(context);
+
     return LayoutBuilder(
       builder: (context, constraints) {
         final size = Size(constraints.maxWidth, constraints.maxHeight);
-        final signature = _buildSignature(size);
+        final signature = _buildSignature(size, textScaler);
 
         if (_lastLayoutSignature != signature || _lastSize != size) {
           _lastLayoutSignature = signature;
           _lastSize = size;
-          _pages = _paginate(constraints);
+          _pages = _paginate(constraints, textScaler);
           if (_currentPage >= _pages.length) {
             _currentPage = (_pages.length - 1).clamp(0, _pages.length);
           }
@@ -535,78 +595,96 @@ class _BookPageViewState extends State<BookPageView>
 
         final isCurl = widget.appearance.pageMode == ReaderPageMode.pageCurl;
 
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTapUp: (details) {
-            final dx = details.localPosition.dx;
+        return Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: (event) {
+            _tapDownTime = DateTime.now();
+            _tapDownPos = event.position;
+          },
+          onPointerUp: (event) {
+            final downTime = _tapDownTime;
+            final downPos = _tapDownPos;
+            _tapDownTime = null;
+            _tapDownPos = null;
+
+            if (downTime == null || downPos == null) return;
+            // Игнорируем долгие зажатия (> 240 мс) и движения пальца, чтобы не было ложных перелистываний при выделении текста
+            final elapsed = DateTime.now().difference(downTime).inMilliseconds;
+            final distance = (event.position - downPos).distance;
+            if (elapsed > 240 || distance > 14.0) return;
+
+            final localDx = event.localPosition.dx;
             final w = size.width;
-            if (dx < w * 0.28) {
+            if (localDx < w * 0.25) {
               _triggerPrevPage();
-            } else if (dx > w * 0.72) {
+            } else if (localDx > w * 0.75) {
               _triggerNextPage();
             } else {
               widget.onCenterTap?.call();
             }
           },
-          onHorizontalDragStart: (_) {
-            _curlController.stop();
-            _isDragging = true;
-          },
-          onHorizontalDragUpdate: (details) {
-            if (!_isDragging) return;
-            final delta = -(details.primaryDelta ?? 0) / size.width;
-            setState(() {
-              _dragProgress = (_dragProgress + delta * 1.25).clamp(-1.0, 1.0);
-            });
-          },
-          onHorizontalDragEnd: (details) {
-            if (!_isDragging) return;
-            _isDragging = false;
-            final velocity = details.primaryVelocity ?? 0;
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onHorizontalDragStart: (_) {
+              _curlController.stop();
+              _isDragging = true;
+            },
+            onHorizontalDragUpdate: (details) {
+              if (!_isDragging) return;
+              final delta = -(details.primaryDelta ?? 0) / size.width;
+              setState(() {
+                _dragProgress = (_dragProgress + delta * 1.25).clamp(-1.0, 1.0);
+              });
+            },
+            onHorizontalDragEnd: (details) {
+              if (!_isDragging) return;
+              _isDragging = false;
+              final velocity = details.primaryVelocity ?? 0;
 
-            if (_dragProgress > 0.20 || velocity < -420) {
-              if (_currentPage + 1 < _pages.length) {
-                if (isCurl) {
-                  _animateCurlTo(1.0, _currentPage + 1);
+              if (_dragProgress > 0.20 || velocity < -420) {
+                if (_currentPage + 1 < _pages.length) {
+                  if (isCurl) {
+                    _animateCurlTo(1.0, _currentPage + 1);
+                  } else {
+                    _goToPage(_currentPage + 1);
+                  }
                 } else {
-                  _goToPage(_currentPage + 1);
+                  setState(() => _dragProgress = 0.0);
+                  widget.onNextChapter?.call();
+                }
+              } else if (_dragProgress < -0.20 || velocity > 420) {
+                if (_currentPage - 1 >= 0) {
+                  if (isCurl) {
+                    _animateCurlTo(-1.0, _currentPage - 1);
+                  } else {
+                    _goToPage(_currentPage - 1);
+                  }
+                } else {
+                  setState(() => _dragProgress = 0.0);
+                  widget.onPrevChapter?.call();
                 }
               } else {
-                setState(() => _dragProgress = 0.0);
-                widget.onNextChapter?.call();
-              }
-            } else if (_dragProgress < -0.20 || velocity > 420) {
-              if (_currentPage - 1 >= 0) {
                 if (isCurl) {
-                  _animateCurlTo(-1.0, _currentPage - 1);
+                  _animateCurlTo(0.0, null);
                 } else {
-                  _goToPage(_currentPage - 1);
+                  setState(() => _dragProgress = 0.0);
                 }
-              } else {
-                setState(() => _dragProgress = 0.0);
-                widget.onPrevChapter?.call();
               }
-            } else {
-              if (isCurl) {
-                _animateCurlTo(0.0, null);
-              } else {
-                setState(() => _dragProgress = 0.0);
-              }
-            }
-          },
-          child: ClipRect(
-            child: isCurl
-                ? _buildCurlStage(size.width)
-                : AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 220),
-                    transitionBuilder: (child, anim) {
-                      return FadeTransition(opacity: anim, child: child);
-                    },
-                    child: KeyedSubtree(
-                      key: ValueKey('slide_page_$_currentPage'),
-                      child: _buildSinglePageContent(_currentPage),
+            },
+            child: ClipRect(
+              child: isCurl
+                  ? _buildCurlStage(size.width)
+                  : AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 220),
+                      transitionBuilder: (child, anim) {
+                        return FadeTransition(opacity: anim, child: child);
+                      },
+                      child: KeyedSubtree(
+                        key: ValueKey('slide_page_$_currentPage'),
+                        child: _buildSinglePageContent(_currentPage),
+                      ),
                     ),
-                  ),
+            ),
           ),
         );
       },
