@@ -1,158 +1,307 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import '../models/book_models.dart';
+import 'offline_translator_service.dart';
+import 'settings_service.dart';
+
+class ModelRateLimitException implements Exception {
+  final String model;
+  final int retryAfterSeconds;
+  final String rawMessage;
+
+  ModelRateLimitException({
+    required this.model,
+    required this.retryAfterSeconds,
+    required this.rawMessage,
+  });
+
+  @override
+  String toString() =>
+      'Лимит модели $model (пауза ${retryAfterSeconds}с): $rawMessage';
+}
 
 class TranslatorService {
-  final TranslatorSettings settings;
+  TranslatorSettings settings;
+  final Map<String, DateTime> _modelCooldownUntil = {};
 
   TranslatorService({required this.settings});
 
-  Future<List<String>> translateBatch({
-    required List<String> paragraphs,
+  bool isModelCoolingDown(String model) {
+    final until = _modelCooldownUntil[model];
+    if (until == null) return false;
+    if (DateTime.now().isAfter(until)) {
+      _modelCooldownUntil.remove(model);
+      return false;
+    }
+    return true;
+  }
+
+  int getShortestCooldownSeconds() {
+    if (_modelCooldownUntil.isEmpty) return 0;
+    final now = DateTime.now();
+    int minSec = 999999;
+    for (final until in _modelCooldownUntil.values) {
+      final diff = until.difference(now).inSeconds;
+      if (diff > 0 && diff < minSec) {
+        minSec = diff;
+      }
+    }
+    return minSec == 999999 ? 0 : minSec;
+  }
+
+  /// Быстрый перевод выделенного слова или фразы (в поп-апе при выделении)
+  Future<String> translateSelection({
+    required String selectedText,
     required String targetLanguage,
-    List<String> contextTail = const [],
-    String? overrideModel,
   }) async {
-    if (paragraphs.isEmpty) return [];
-    if (settings.apiKey.trim().isEmpty) {
-      throw Exception('Не указан API Key в настройках переводчика');
+    final clean = selectedText.trim();
+    if (clean.isEmpty) return '';
+
+    if (settings.engineMode == TranslationEngineMode.offlineLocal ||
+        settings.apiKey.trim().isEmpty) {
+      return OfflineTranslatorService.instance.translateText(
+        clean,
+        targetLanguage: targetLanguage,
+      );
     }
-
-    final activeModel = (overrideModel != null && overrideModel.trim().isNotEmpty)
-        ? overrideModel.trim()
-        : settings.model.trim();
-
-    final indexedInput = [
-      for (int i = 0; i < paragraphs.length; i++)
-        {'index': i, 'text': paragraphs[i]},
-    ];
-
-    final contextSection = contextTail.isEmpty
-        ? ''
-        : '''
-
-Контекст предыдущих абзацев (уже переведены, НЕ включай их в ответ, используй только для согласования рода, времени, имён и стиля речи):
-${contextTail.join('\n')}
-''';
-
-    final systemPrompt = '''
-Ты профессиональный литературный переводчик художественной литературы на $targetLanguage язык.
-Переводи естественно, художественно и связно, сохраняя авторский стиль, интонацию диалогов, пол персонажей, обращения на «ты/вы» и имена собственные.
-Не сокращай и не объединяй абзацы: каждому входному элементу с "index" должен строго соответствовать один переведённый элемент с тем же "index".
-На вход ты получаешь JSON-массив объектов с полями "index" и "text".$contextSection
-Верни СТРОГО валидный JSON-массив такого же размера с полями "index" и "translation", без markdown-обёрток (```json) и без каких-либо пояснений.
-''';
-
-    final response = await http.post(
-      Uri.parse(settings.endpointUrl),
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'User-Agent':
-            'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36',
-        'Authorization': 'Bearer ${settings.apiKey}',
-      },
-      body: jsonEncode({
-        'model': activeModel,
-        'temperature': 0.3,
-        'messages': [
-          {'role': 'system', 'content': systemPrompt},
-          {'role': 'user', 'content': jsonEncode(indexedInput)},
-        ],
-      }),
-    );
-
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      final errBody = utf8.decode(response.bodyBytes);
-      throw Exception('API ${response.statusCode}:$errBody');
-    }
-
-    final decoded =
-        jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-    final rawContent =
-        decoded['choices'][0]['message']['content']?.toString() ?? '';
-
-    final cleanedJson = _sanitizeJsonArray(_extractJsonArray(rawContent));
-    final result = List<String>.filled(paragraphs.length, '');
 
     try {
-      final parsedList = jsonDecode(cleanedJson) as List<dynamic>;
-      for (final item in parsedList) {
-        if (item is Map<String, dynamic>) {
-          final rawIdx = item['index'];
-          final idx = rawIdx is int
-              ? rawIdx
-              : int.tryParse(rawIdx?.toString() ?? '');
-          final trans = item['translation']?.toString() ?? '';
-          if (idx != null && idx >= 0 && idx < result.length) {
-            result[idx] = trans.trim();
-          }
-        }
-      }
-    } on FormatException {
-      final fallbackPairs = _regexFallbackExtract(cleanedJson);
-      if (fallbackPairs.isEmpty) rethrow;
-      fallbackPairs.forEach((idx, trans) {
-        if (idx >= 0 && idx < result.length) {
-          result[idx] = trans.trim();
-        }
-      });
+      final translated = await translateBatch(
+        paragraphs: [clean],
+        previousContext: const [],
+        targetLanguage: targetLanguage,
+      );
+      return translated.isNotEmpty ? translated.first : '';
+    } catch (_) {
+      // Если сеть/лимит недоступны — мгновенно страхуем офлайн-моделью
+      return OfflineTranslatorService.instance.translateText(
+        clean,
+        targetLanguage: targetLanguage,
+      );
     }
-
-    for (int i = 0; i < result.length; i++) {
-      if (result[i].isEmpty) {
-        result[i] = paragraphs[i];
-      }
-    }
-
-    return result;
   }
 
-  String _extractJsonArray(String text) {
-    var trimmed = text.trim();
-    if (trimmed.startsWith('```')) {
-      trimmed = trimmed
-          .replaceFirst(RegExp(r'^```[a-zA-Z]*\s*'), '')
-          .replaceFirst(RegExp(r'\s*```$'), '')
-          .trim();
+  Future<List<String>> translateBatch({
+    required List<String> paragraphs,
+    required List<String> previousContext,
+    required String targetLanguage,
+    void Function(String activeModel)? onModelSelected,
+  }) async {
+    if (paragraphs.isEmpty) return [];
+
+    // 1. Встроенный офлайн-режим (Google ML Kit)
+    if (settings.engineMode == TranslationEngineMode.offlineLocal) {
+      onModelSelected?.call('Offline ML Kit');
+      final results = <String>[];
+      for (final p in paragraphs) {
+        final tr = await OfflineTranslatorService.instance.translateText(
+          p,
+          targetLanguage: targetLanguage,
+        );
+        results.add(tr);
+      }
+      return results;
     }
-    final start = trimmed.indexOf('[');
-    final end = trimmed.lastIndexOf(']');
+
+    // 2. LLM-режим (OpenRouter 1-клик или свой API)
+    if (settings.apiKey.trim().isEmpty) {
+      throw Exception(
+        'Не подключён переводчик: нажмите «Подключить в 1 клик» или включите офлайн-модель в настройках',
+      );
+    }
+
+    final pool = settings.activeModelPool;
+    if (pool.isEmpty) {
+      throw Exception('Не указаны модели в настройках');
+    }
+
+    final availableModels =
+        pool.where((m) => !isModelCoolingDown(m)).toList();
+
+    if (availableModels.isEmpty) {
+      final waitSec = getShortestCooldownSeconds().clamp(3, 90);
+      throw ModelRateLimitException(
+        model: pool.first,
+        retryAfterSeconds: waitSec,
+        rawMessage: 'Все модели временно в лимите',
+      );
+    }
+
+    Exception? lastError;
+
+    for (final candidateModel in availableModels) {
+      onModelSelected?.call(candidateModel);
+      try {
+        return await _callModelWithRetry(
+          model: candidateModel,
+          paragraphs: paragraphs,
+          previousContext: previousContext,
+          targetLanguage: targetLanguage,
+        );
+      } on ModelRateLimitException catch (rateErr) {
+        _modelCooldownUntil[candidateModel] =
+            DateTime.now().add(Duration(seconds: rateErr.retryAfterSeconds));
+        lastError = rateErr;
+        continue;
+      } catch (e) {
+        lastError = e is Exception ? e : Exception(e.toString());
+        continue;
+      }
+    }
+
+    final waitSec = getShortestCooldownSeconds();
+    if (waitSec > 0) {
+      throw ModelRateLimitException(
+        model: pool.first,
+        retryAfterSeconds: waitSec.clamp(3, 90),
+        rawMessage: lastError?.toString() ?? 'Все модели достигли лимита',
+      );
+    }
+
+    throw lastError ?? Exception('Не удалось выполнить перевод');
+  }
+
+  Future<List<String>> _callModelWithRetry({
+    required String model,
+    required List<String> paragraphs,
+    required List<String> previousContext,
+    required String targetLanguage,
+  }) async {
+    const maxAttempts = 2;
+    Exception? attemptError;
+
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await _sendRequest(
+          model: model,
+          paragraphs: paragraphs,
+          previousContext: previousContext,
+          targetLanguage: targetLanguage,
+        );
+      } on ModelRateLimitException {
+        rethrow;
+      } catch (e) {
+        attemptError = e is Exception ? e : Exception(e.toString());
+        if (attempt < maxAttempts) {
+          await Future.delayed(Duration(milliseconds: 900 * attempt));
+        }
+      }
+    }
+    throw attemptError ?? Exception('Ошибка запроса к модели $model');
+  }
+
+  Future<List<String>> _sendRequest({
+    required String model,
+    required List<String> paragraphs,
+    required List<String> previousContext,
+    required String targetLanguage,
+  }) async {
+    final uri = Uri.parse(settings.endpointUrl);
+
+    final contextBlock = previousContext.isEmpty
+        ? 'Нет предыдущего контекста (начало главы).'
+        : previousContext.join('\n');
+
+    final numberedInput = <String, String>{};
+    for (int i = 0; i < paragraphs.length; i++) {
+      numberedInput['$i'] = paragraphs[i];
+    }
+
+    final systemPrompt = '''
+Ты профессиональный художественный переводчик книг. Переводи текст на $targetLanguage язык.
+Правила:
+1. Сохраняй единый стиль, терминологию, имена собственные и пол персонажей, опираясь на контекст.
+2. Переводи строго каждый абзац из входного JSON-объекта, сохраняя то же количество ключей ("0", "1", ...).
+3. Не добавляй отсебятину, комментарии или пояснения.
+4. Ответь СТРОГО валидным JSON-объектом формата: {"translations": ["перевод 0", "перевод 1", ...]}.
+''';
+
+    final userPrompt = '''
+КОНТЕКСТ ПРЕДЫДУЩИХ АБЗАЦЕВ (только для понимания стиля и имён, не переводить повторно):
+$contextBlock
+
+АБЗАЦЫ ДЛЯ ПЕРЕВОДА (ровно ${paragraphs.length} шт.):
+${jsonEncode(numberedInput)}
+''';
+
+    final body = jsonEncode({
+      'model': model,
+      'temperature': 0.3,
+      'response_format': {'type': 'json_object'},
+      'messages': [
+        {'role': 'system', 'content': systemPrompt},
+        {'role': 'user', 'content': userPrompt},
+      ],
+    });
+
+    final response = await http
+        .post(
+          uri,
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'User-Agent': 'TransReader/1.0',
+            'HTTP-Referer': 'https://transreader.app',
+            'X-Title': 'TransReader',
+            'Authorization': 'Bearer ${settings.apiKey}',
+          },
+          body: body,
+        )
+        .timeout(const Duration(seconds: 60));
+
+    if (response.statusCode == 429) {
+      final retryHeader = response.headers['retry-after'];
+      int waitSec = int.tryParse(retryHeader ?? '') ?? 15;
+      if (waitSec < 3) waitSec = 10;
+      if (waitSec > 90) waitSec = 60;
+      throw ModelRateLimitException(
+        model: model,
+        retryAfterSeconds: waitSec,
+        rawMessage: 'HTTP 429 Too Many Requests',
+      );
+    }
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final bodyLower = response.body.toLowerCase();
+      if (bodyLower.contains('rate_limit') ||
+          bodyLower.contains('rate limit') ||
+          bodyLower.contains('quota')) {
+        throw ModelRateLimitException(
+          model: model,
+          retryAfterSeconds: 20,
+          rawMessage: 'API ${response.statusCode}',
+        );
+      }
+      throw Exception('API ${response.statusCode}: ${response.body}');
+    }
+
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    final content =
+        decoded['choices']?[0]?['message']?['content']?.toString() ?? '';
+
+    if (content.isEmpty) {
+      throw Exception('Пустой ответ от модели $model');
+    }
+
+    final cleanJson = _extractJsonObject(content);
+    final parsedContent = jsonDecode(cleanJson);
+    final translationsRaw = parsedContent['translations'];
+
+    if (translationsRaw is! List || translationsRaw.length != paragraphs.length) {
+      throw Exception(
+        'Модель $model вернула ${translationsRaw is List ? translationsRaw.length : 0} абзацев вместо ${paragraphs.length}',
+      );
+    }
+
+    return translationsRaw.map((e) => e.toString().trim()).toList();
+  }
+
+  String _extractJsonObject(String raw) {
+    final start = raw.indexOf('{');
+    final end = raw.lastIndexOf('}');
     if (start != -1 && end != -1 && end > start) {
-      return trimmed.substring(start, end + 1);
+      return raw.substring(start, end + 1);
     }
-    return trimmed;
-  }
-
-  String _sanitizeJsonArray(String raw) {
-    var fixed = raw;
-    fixed = fixed.replaceAllMapped(
-      RegExp(r'"index"\s*:\s*"?(\d+)"+'),
-      (m) => '"index":${m.group(1)}',
-    );
-    fixed = fixed.replaceAll(RegExp(r',\s*([\]\}])'), r'$1');
-    return fixed;
-  }
-
-  Map<int, String> _regexFallbackExtract(String raw) {
-    final extracted = <int, String>{};
-    final pattern = RegExp(
-      r'"index"\s*:\s*"?(\d+)"?\s*,\s*"translation"\s*:\s*"((?:\\.|[^"\\])*)"',
-      dotAll: true,
-    );
-    for (final match in pattern.allMatches(raw)) {
-      final idx = int.tryParse(match.group(1) ?? '');
-      final rawStr = match.group(2);
-      if (idx != null && rawStr != null) {
-        try {
-          extracted[idx] = jsonDecode('"$rawStr"').toString();
-        } catch (_) {
-          extracted[idx] = rawStr
-              .replaceAll(r'\"', '"')
-              .replaceAll(r'\n', '\n');
-        }
-      }
-    }
-    return extracted;
+    return raw;
   }
 }
