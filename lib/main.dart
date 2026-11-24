@@ -74,6 +74,7 @@ class LibraryScreen extends StatefulWidget {
 class _LibraryScreenState extends State<LibraryScreen> {
   final SettingsService _settingsService = SettingsService();
   TranslatorSettings _settings = const TranslatorSettings();
+  late final TranslatorService _translatorService;
   late final TranslationQueueController _queueController;
   List<Book> _books = [];
   bool _loading = true;
@@ -82,9 +83,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
   @override
   void initState() {
     super.initState();
+    _translatorService = TranslatorService(settings: _settings);
     _queueController = TranslationQueueController(
       db: BookDatabase.instance,
-      translator: TranslatorService(settings: _settings),
+      translator: _translatorService,
     );
     _initAll();
   }
@@ -100,6 +102,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final loadedSettings = await _settingsService.loadSettings();
     final loadedBooks = await BookDatabase.instance.getBooks();
     if (!mounted) return;
+    _translatorService.settings = loadedSettings;
     _queueController.updateSettings(loadedSettings);
     setState(() {
       _settings = loadedSettings;
@@ -217,6 +220,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ),
     );
     if (updated != null && mounted) {
+      _translatorService.settings = updated;
       _queueController.updateSettings(updated);
       setState(() => _settings = updated);
     }
@@ -229,6 +233,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             builder: (_) => ReaderScreen(
               book: book,
               queueController: _queueController,
+              translatorService: _translatorService,
               targetLanguage: _settings.targetLanguage,
             ),
           ),
@@ -237,10 +242,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   void _downloadFullBook(Book book) {
-    if (_settings.apiKey.trim().isEmpty) {
+    final isOffline = _settings.engineMode == TranslationEngineMode.offlineLocal;
+    if (!isOffline && _settings.apiKey.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Сначала укажите API Key в настройках переводчика'),
+          content: Text(
+            'Подключите переводчик в 1 клик или включите офлайн-модель в настройках',
+          ),
         ),
       );
       return;
@@ -290,7 +298,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.settings),
-            tooltip: 'Настройки API',
+            tooltip: 'Настройки переводчика',
             onPressed: _openSettings,
           ),
         ],
