@@ -32,7 +32,7 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Configure AndroidManifest (Name, Internet, Impeller, AppLink)
+      - name: Configure AndroidManifest (Name, Internet, Impeller, DeepLink)
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST" ]; then
@@ -43,8 +43,8 @@ jobs:
             if ! grep -q "EnableImpeller" "$MANIFEST"; then
               sed -i 's|</application>|    <meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false" />\n    </application>|' "$MANIFEST"
             fi
-            if ! grep -q 'android:host="transreader.app"' "$MANIFEST"; then
-              sed -i 's|</activity>|    <intent-filter>\n                <action android:name="android.intent.action.VIEW" />\n                <category android:name="android.intent.category.DEFAULT" />\n                <category android:name="android.intent.category.BROWSABLE" />\n                <data android:scheme="https" android:host="transreader.app" android:pathPrefix="/callback" />\n            </intent-filter>\n        </activity>|' "$MANIFEST"
+            if ! grep -q 'android:scheme="transreader"' "$MANIFEST"; then
+              sed -i 's|</activity>|    <intent-filter>\n                <action android:name="android.intent.action.VIEW" />\n                <category android:name="android.intent.category.DEFAULT" />\n                <category android:name="android.intent.category.BROWSABLE" />\n                <data android:scheme="transreader" android:host="callback" />\n            </intent-filter>\n        </activity>|' "$MANIFEST"
             fi
           fi
 
