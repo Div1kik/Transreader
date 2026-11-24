@@ -1,20 +1,24 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import '../db/book_database.dart';
 import '../models/book_models.dart';
 import '../models/reader_theme_settings.dart';
 import '../services/translation_queue.dart';
+import '../services/translator_service.dart';
 import '../widgets/book_page_view.dart';
 
 class ReaderScreen extends StatefulWidget {
   final Book book;
   final TranslationQueueController queueController;
+  final TranslatorService translatorService;
   final String targetLanguage;
 
   const ReaderScreen({
     super.key,
     required this.book,
     required this.queueController,
+    required this.translatorService,
     required this.targetLanguage,
   });
 
@@ -29,6 +33,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   int _currentPageInChapter = 0;
   bool _loadingChapter = true;
   bool _showControls = true;
+  String _scrollSelectedText = '';
 
   ReaderAppearance _appearance = const ReaderAppearance();
 
@@ -112,6 +117,104 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
+  /// Всплывающее окно с переводом выделенного слова или строки
+  void _showSelectionTranslationSheet(String selectedText) {
+    final palette = ReaderPalette.of(_appearance.colorTheme);
+
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: palette.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.translate, color: palette.accent, size: 20),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Быстрый перевод фрагмента',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: palette.text,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: palette.background,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  selectedText,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontStyle: FontStyle.italic,
+                    color: palette.secondaryText,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              FutureBuilder<String>(
+                future: widget.translatorService.translateSelection(
+                  selectedText: selectedText,
+                  targetLanguage: widget.targetLanguage,
+                ),
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return Row(
+                      children: [
+                        SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: palette.accent,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Text(
+                          'Переводим...',
+                          style: TextStyle(color: palette.text),
+                        ),
+                      ],
+                    );
+                  }
+                  if (snapshot.hasError) {
+                    return Text(
+                      'Не удалось перевести: ${snapshot.error}',
+                      style: const TextStyle(color: Colors.redAccent),
+                    );
+                  }
+                  return SelectableText(
+                    snapshot.data ?? '',
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w500,
+                      height: 1.4,
+                      color: palette.text,
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   String _statusLabel(ChapterStatus status) {
     switch (status) {
       case ChapterStatus.completed:
@@ -180,9 +283,63 @@ class _ReaderScreenState extends State<ReaderScreen> {
                       color: palette.text,
                     ),
                   ),
+                  const SizedBox(height: 14),
+
+                  // 1. Язык текста на странице
+                  Text(
+                    'Отображение текста',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: palette.secondaryText,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      _modeChip(
+                        palette: palette,
+                        icon: Icons.translate,
+                        label: 'Перевод',
+                        selected: _appearance.textDisplay ==
+                            ReaderTextDisplay.translationOnly,
+                        onTap: () => apply(
+                          _appearance.copyWith(
+                            textDisplay: ReaderTextDisplay.translationOnly,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      _modeChip(
+                        palette: palette,
+                        icon: Icons.vertical_split,
+                        label: 'Билингва',
+                        selected: _appearance.textDisplay ==
+                            ReaderTextDisplay.bilingual,
+                        onTap: () => apply(
+                          _appearance.copyWith(
+                            textDisplay: ReaderTextDisplay.bilingual,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      _modeChip(
+                        palette: palette,
+                        icon: Icons.menu_book,
+                        label: 'Оригинал',
+                        selected: _appearance.textDisplay ==
+                            ReaderTextDisplay.originalOnly,
+                        onTap: () => apply(
+                          _appearance.copyWith(
+                            textDisplay: ReaderTextDisplay.originalOnly,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                   const SizedBox(height: 16),
 
-                  // 1. Цветовая гамма
+                  // 2. Цветовая гамма
                   Text(
                     'Цветовая схема',
                     style: TextStyle(
@@ -241,9 +398,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
                       );
                     }).toList(),
                   ),
-                  const SizedBox(height: 18),
+                  const SizedBox(height: 16),
 
-                  // 2. Тип чтения
+                  // 3. Тип чтения
                   Text(
                     'Режим листания',
                     style: TextStyle(
@@ -293,9 +450,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
                       ),
                     ],
                   ),
-                  const SizedBox(height: 18),
+                  const SizedBox(height: 16),
 
-                  // 3. Размер шрифта
+                  // 4. Размер шрифта
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -353,7 +510,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     ],
                   ),
 
-                  // 4. Межстрочный интервал
+                  // 5. Межстрочный интервал
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -383,19 +540,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     value: _appearance.lineHeight,
                     onChanged: (v) =>
                         apply(_appearance.copyWith(lineHeight: v)),
-                  ),
-
-                  // 5. Оригинал текста
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    activeColor: palette.accent,
-                    title: Text(
-                      'Показывать оригинал под переводом',
-                      style: TextStyle(fontSize: 14, color: palette.text),
-                    ),
-                    value: _appearance.showOriginal,
-                    onChanged: (val) =>
-                        apply(_appearance.copyWith(showOriginal: val)),
                   ),
                 ],
               ),
@@ -722,6 +866,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                             overrideMode: TranslateMode.nextChapters,
                             overrideAhead: 1,
                           ),
+                          onTranslateSelection: _showSelectionTranslationSheet,
                         ),
             ),
           ],
@@ -743,8 +888,28 @@ class _ReaderScreenState extends State<ReaderScreen> {
       );
     }
 
-    return GestureDetector(
-      onTap: () => setState(() => _showControls = !_showControls),
+    return SelectionArea(
+      onSelectionChanged: (SelectedContent? content) {
+        _scrollSelectedText = content?.plainText ?? '';
+      },
+      contextMenuBuilder: (context, selectableRegionState) {
+        final items = <ContextMenuButtonItem>[
+          ...selectableRegionState.contextMenuButtonItems,
+          if (_scrollSelectedText.trim().isNotEmpty)
+            ContextMenuButtonItem(
+              label: 'Перевести',
+              onPressed: () {
+                final toTranslate = _scrollSelectedText.trim();
+                selectableRegionState.hideToolbar();
+                _showSelectionTranslationSheet(toTranslate);
+              },
+            ),
+        ];
+        return AdaptiveTextSelectionToolbar.buttonItems(
+          anchors: selectableRegionState.contextMenuAnchors,
+          buttonItems: items,
+        );
+      },
       child: ListView.builder(
         padding: const EdgeInsets.fromLTRB(20, 18, 20, 48),
         itemCount: _paragraphs.length + 1,
@@ -772,7 +937,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                if (hasTranslation)
+                if (_appearance.isOriginalOnly)
+                  Text(
+                    p.sourceText,
+                    style: TextStyle(
+                      fontSize: _appearance.fontSize,
+                      height: _appearance.lineHeight,
+                      color: palette.text,
+                    ),
+                  )
+                else if (hasTranslation)
                   Text(
                     p.translatedText!,
                     style: TextStyle(
@@ -813,8 +987,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   Text(
                     p.sourceText,
                     style: TextStyle(
-                      fontSize: (_appearance.fontSize - 4).clamp(11.0, 24.0),
-                      height: 1.35,
+                      fontSize: (_appearance.fontSize - 3.5).clamp(11.0, 24.0),
+                      height: 1.38,
                       color: palette.secondaryText,
                       fontStyle: FontStyle.italic,
                     ),
