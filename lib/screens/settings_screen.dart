@@ -1,11 +1,6 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:math';
-import 'package:app_links/app_links.dart';
-import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../db/book_database.dart';
 import '../services/offline_translator_service.dart';
@@ -23,7 +18,8 @@ class SettingsScreen extends StatefulWidget {
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
-class _SettingsScreenState extends State<SettingsScreen> {
+class _SettingsScreenState extends State<SettingsScreen>
+    with WidgetsBindingObserver {
   final SettingsService _settingsService = SettingsService();
   late TranslationEngineMode _engineMode;
   late TextEditingController _endpointController;
@@ -34,21 +30,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   bool _obscureKey = true;
   bool _advancedExpanded = false;
-  bool _authInProgress = false;
   bool _downloadingOfflineModel = false;
   String? _offlineStatusStep;
   bool _offlineModelReady = false;
   bool _backupBusy = false;
-
-  String? _lastHandledCode;
-  StreamSubscription<Uri>? _linkSub;
-
-  static const String _callbackUrl = 'https://div1kik.github.io/Transreader/';
-  static const String _kPendingVerifier = 'pkce_pending_code_verifier';
+  bool _waitingForGroqKey = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _engineMode = widget.initialSettings.engineMode;
     _endpointController =
         TextEditingController(text: widget.initialSettings.endpointUrl);
@@ -64,7 +55,61 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     _advancedExpanded = _engineMode == TranslationEngineMode.customApi;
     _checkOfflineModel();
-    _listenDeepLinks();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Когда пользователь возвращается из браузера с скопированным gsk_ ключом — подхватываем его автоматически
+    if (state == AppLifecycleState.resumed && _waitingForGroqKey) {
+      _waitingForGroqKey = false;
+      _tryPasteGroqKeyFromClipboard(silentIfNotFound: true);
+    }
+  }
+
+  Future<void> _openGroqKeysPage() async {
+    _waitingForGroqKey = true;
+    final uri = Uri.parse('https://console.groq.com/keys');
+    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!launched && mounted) {
+      _waitingForGroqKey = false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Не удалось открыть console.groq.com')),
+      );
+    }
+  }
+
+  Future<void> _tryPasteGroqKeyFromClipboard({
+    bool silentIfNotFound = false,
+  }) async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final clipText = data?.text?.trim() ?? '';
+
+    if (clipText.startsWith('gsk_') && clipText.length > 20) {
+      if (!mounted) return;
+      setState(() {
+        _engineMode = TranslationEngineMode.groqCloud;
+        _apiKeyController.text = clipText;
+        _endpointController.text =
+            'https://api.groq.com/openai/v1/chat/completions';
+        _modelController.text = 'llama-3.3-70b-versatile';
+        _fallbacksController.text =
+            'openai/gpt-oss-120b, openai/gpt-oss-20b, meta-llama/llama-4-scout-17b-16e-instruct';
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Ключ Groq (gsk_...) подхвачен и сохранён!'),
+        ),
+      );
+      await _save();
+    } else if (!silentIfNotFound && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'В буфере обмена пока нет ключа Groq (должен начинаться с gsk_)',
+          ),
+        ),
+      );
+    }
   }
 
   Future<void> _checkOfflineModel() async {
@@ -75,124 +120,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     if (mounted) {
       setState(() => _offlineModelReady = ready);
-    }
-  }
-
-  Future<void> _handleIncomingUri(Uri? uri) async {
-    if (uri == null) return;
-    if (uri.scheme == 'transreader' && uri.host == 'callback') {
-      final code = uri.queryParameters['code'];
-      if (code != null && code.isNotEmpty && code != _lastHandledCode) {
-        _lastHandledCode = code;
-        await _exchangeOpenRouterCode(code);
-      }
-    }
-  }
-
-  void _listenDeepLinks() {
-    final appLinks = AppLinks();
-    appLinks.getInitialLink().then(_handleIncomingUri);
-    _linkSub = appLinks.uriLinkStream.listen(_handleIncomingUri);
-  }
-
-  String _generateCodeVerifier() {
-    const chars =
-        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
-    final rnd = Random.secure();
-    return List.generate(64, (_) => chars[rnd.nextInt(chars.length)]).join();
-  }
-
-  String _generateCodeChallenge(String verifier) {
-    final bytes = utf8.encode(verifier);
-    final digest = sha256.convert(bytes);
-    return base64UrlEncode(digest.bytes).replaceAll('=', '');
-  }
-
-  Future<void> _startOpenRouterOneClickAuth() async {
-    setState(() => _authInProgress = true);
-    try {
-      final verifier = _generateCodeVerifier();
-      final challenge = _generateCodeChallenge(verifier);
-
-      // Сохраняем verifier на диск, чтобы он не потерялся даже при перезапуске экрана
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_kPendingVerifier, verifier);
-
-      final authUri = Uri.https('openrouter.ai', '/auth', {
-        'callback_url': _callbackUrl,
-        'code_challenge': challenge,
-        'code_challenge_method': 'S256',
-      });
-
-      final launched = await launchUrl(
-        authUri,
-        mode: LaunchMode.externalApplication,
-      );
-      if (!launched) {
-        throw Exception('Не удалось открыть браузер для авторизации');
-      }
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _authInProgress = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка запуска авторизации: $e')),
-      );
-    }
-  }
-
-  Future<void> _exchangeOpenRouterCode(String code) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final verifier = prefs.getString(_kPendingVerifier) ?? '';
-
-      final response = await http.post(
-        Uri.parse('https://openrouter.ai/api/v1/auth/keys'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'code': code,
-          'code_verifier': verifier,
-          'code_challenge_method': 'S256',
-        }),
-      );
-
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw Exception(
-          'Ошибка получения ключа (${response.statusCode}): ${response.body}',
-        );
-      }
-
-      final data = jsonDecode(response.body);
-      final receivedKey = data['key']?.toString() ?? '';
-      if (receivedKey.isEmpty) {
-        throw Exception('Сервер не вернул ключ');
-      }
-
-      await prefs.remove(_kPendingVerifier);
-
-      if (!mounted) return;
-      setState(() {
-        _engineMode = TranslationEngineMode.oneClickOpenRouter;
-        _apiKeyController.text = receivedKey;
-        _endpointController.text =
-            'https://openrouter.ai/api/v1/chat/completions';
-        _modelController.text = 'meta-llama/llama-3.3-70b-instruct:free';
-        _fallbacksController.text =
-            'google/gemma-3-27b-it:free, mistralai/mistral-small-3.1-24b-instruct:free, qwen/qwen-2.5-72b-instruct:free';
-        _authInProgress = false;
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Готово! Ключ автоматически подключён и сохранён.'),
-        ),
-      );
-      await _save();
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _authInProgress = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка обмена ключа: $e')),
-      );
     }
   }
 
@@ -219,7 +146,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-              'Офлайн-модель скачана! Теперь можно переводить без интернета.'),
+            'Офлайн-модель скачана! Теперь можно переводить без интернета.',
+          ),
         ),
       );
     } catch (e) {
@@ -284,7 +212,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
-    _linkSub?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     _endpointController.dispose();
     _apiKeyController.dispose();
     _modelController.dispose();
@@ -336,7 +264,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          // БЛОК 1: Вход в 1 клик (OpenRouter OAuth)
+          // БЛОК 1: Подключение Groq (основной быстрый движок)
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -349,7 +277,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       const SizedBox(width: 8),
                       const Expanded(
                         child: Text(
-                          'Быстрое подключение в 1 клик',
+                          'Подключение Groq (основной режим)',
                           style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
@@ -357,8 +285,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                       ),
                       if (hasKey &&
-                          _engineMode ==
-                              TranslationEngineMode.oneClickOpenRouter)
+                          _engineMode == TranslationEngineMode.groqCloud)
                         const Icon(
                           Icons.check_circle,
                           color: Colors.greenAccent,
@@ -368,36 +295,53 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   const SizedBox(height: 8),
                   const Text(
-                    'Откроется окно входа OpenRouter. Войдите через Google и нажмите кнопку подтверждения (Open App) — ключ создастся и подтянется в приложение автоматически.',
+                    '1. Откройте сайт Groq и нажмите «Create API Key» → «Copy».\n2. Вернитесь в приложение — ключ gsk_... подхватится сам и настроит все 4 быстрые модели.',
                     style: TextStyle(fontSize: 13, color: Color(0xFFA89E93)),
                   ),
                   const SizedBox(height: 14),
                   SizedBox(
                     width: double.infinity,
                     child: FilledButton.icon(
-                      onPressed:
-                          _authInProgress ? null : _startOpenRouterOneClickAuth,
-                      icon: _authInProgress
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.login),
-                      label: Text(
-                        hasKey
-                            ? 'Переподключить / Обновить ключ (1 клик)'
-                            : 'Подключить в 1 клик (OpenRouter)',
+                      onPressed: _openGroqKeysPage,
+                      icon: const Icon(Icons.open_in_new),
+                      label: const Text('1. Получить ключ на Groq'),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: () =>
+                          _tryPasteGroqKeyFromClipboard(silentIfNotFound: false),
+                      icon: const Icon(Icons.content_paste_go),
+                      label: const Text('2. Вставить ключ из буфера и включить'),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _apiKeyController,
+                    obscureText: _obscureKey,
+                    onChanged: (val) {
+                      if (val.trim().startsWith('gsk_')) {
+                        _engineMode = TranslationEngineMode.groqCloud;
+                        _endpointController.text =
+                            'https://api.groq.com/openai/v1/chat/completions';
+                      }
+                      setState(() {});
+                    },
+                    decoration: InputDecoration(
+                      labelText: 'Ключ Groq (gsk_...)',
+                      hintText: 'gsk_...',
+                      border: const OutlineInputBorder(),
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          _obscureKey ? Icons.visibility : Icons.visibility_off,
+                        ),
+                        onPressed: () =>
+                            setState(() => _obscureKey = !_obscureKey),
                       ),
                     ),
                   ),
-                  if (hasKey) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      'Ключ активен: ${_apiKeyController.text.substring(0, _apiKeyController.text.length.clamp(0, 10))}...',
-                      style: TextStyle(fontSize: 12, color: accent),
-                    ),
-                  ],
                 ],
               ),
             ),
@@ -439,8 +383,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             }
                           } else {
                             setState(() {
-                              _engineMode =
-                                  TranslationEngineMode.oneClickOpenRouter;
+                              _engineMode = TranslationEngineMode.groqCloud;
                             });
                           }
                         },
@@ -449,7 +392,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   const SizedBox(height: 6),
                   const Text(
-                    'Работает вообще без интернета, ключей и VPN. Скачивает языковую модель (~30 МБ) один раз прямо в телефон.',
+                    'Работает вообще без интернета и ключей. Скачивает языковую модель (~30 МБ) один раз прямо в телефон.',
                     style: TextStyle(fontSize: 13, color: Color(0xFFA89E93)),
                   ),
                   const SizedBox(height: 12),
@@ -568,7 +511,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           const SizedBox(height: 12),
 
-          // БЛОК 5: Для продвинутых пользователей (ручной ввод API)
+          // БЛОК 5: Для продвинутых пользователей (настройка моделей и Endpoint)
           Card(
             child: ExpansionTile(
               initiallyExpanded: _advancedExpanded,
@@ -579,7 +522,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 style: TextStyle(fontWeight: FontWeight.w600),
               ),
               subtitle: const Text(
-                'Ручной ввод API Key, Endpoint и списка моделей (Groq, OpenRouter, Gemini)',
+                'Настройка Endpoint URL и пула моделей (Groq, OpenRouter, Gemini)',
                 style: TextStyle(fontSize: 12, color: Color(0xFFA89E93)),
               ),
               children: [
@@ -592,10 +535,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         spacing: 8,
                         children: [
                           ActionChip(
-                            label: const Text('Groq Free'),
+                            label: const Text('Groq Free (Рекомендуемый)'),
                             onPressed: () {
                               setState(() {
-                                _engineMode = TranslationEngineMode.customApi;
+                                _engineMode = TranslationEngineMode.groqCloud;
                                 _endpointController.text =
                                     'https://api.groq.com/openai/v1/chat/completions';
                                 _modelController.text =
@@ -629,26 +572,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         decoration: const InputDecoration(
                           labelText: 'API Endpoint URL',
                           border: OutlineInputBorder(),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: _apiKeyController,
-                        obscureText: _obscureKey,
-                        onChanged: (_) =>
-                            _engineMode = TranslationEngineMode.customApi,
-                        decoration: InputDecoration(
-                          labelText: 'API Key',
-                          border: const OutlineInputBorder(),
-                          suffixIcon: IconButton(
-                            icon: Icon(
-                              _obscureKey
-                                  ? Icons.visibility
-                                  : Icons.visibility_off,
-                            ),
-                            onPressed: () =>
-                                setState(() => _obscureKey = !_obscureKey),
-                          ),
                         ),
                       ),
                       const SizedBox(height: 12),
