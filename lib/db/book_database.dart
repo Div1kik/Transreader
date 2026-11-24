@@ -15,12 +15,24 @@ class BookDatabase {
     return join(dbPath, 'transreader_books.db');
   }
 
+  Future<void> _ensureDictionaryTable(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS dictionary (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sourceText TEXT NOT NULL,
+        translatedText TEXT NOT NULL,
+        bookTitle TEXT NOT NULL DEFAULT '',
+        createdAt INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
+  }
+
   Future<Database> get database async {
     if (_db != null && _db!.isOpen) return _db!;
     final path = await getDatabaseFilePath();
     _db = await openDatabase(
       path,
-      version: 1,
+      version: 2,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE books (
@@ -55,14 +67,23 @@ class BookDatabase {
         await db.execute(
           'CREATE INDEX idx_paragraphs_book_ch ON paragraphs (bookId, chapterIndex, orderIndex)',
         );
+
+        await _ensureDictionaryTable(db);
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await _ensureDictionaryTable(db);
+        }
+      },
+      onOpen: (db) async {
+        // Гарантируем наличие таблицы словаря даже при восстановлении старого v1 бэкапа
+        await _ensureDictionaryTable(db);
       },
     );
     return _db!;
   }
 
-  /// Экспортирует текущую базу книг и переводов в выбранную папку на устройстве
   Future<String?> exportBackup() async {
-    // Гарантируем, что база инициализирована и сброшена на диск
     final db = await database;
     await db.rawQuery('PRAGMA wal_checkpoint(FULL)');
 
@@ -78,7 +99,7 @@ class BookDatabase {
         '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
 
     final savedPath = await FilePicker.platform.saveFile(
-      dialogTitle: 'Сохранить резервную копию книг',
+      dialogTitle: 'Сохранить резервную копию книг и словаря',
       fileName: 'TransReader_backup_$stamp.db',
       bytes: bytes,
     );
@@ -86,7 +107,6 @@ class BookDatabase {
     return savedPath;
   }
 
-  /// Восстанавливает библиотеку и переводы из выбранного .db файла
   Future<bool> importBackup() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.any,
@@ -102,7 +122,6 @@ class BookDatabase {
       throw Exception('Выбран пустой или повреждённый файл');
     }
 
-    // Проверяем стандартный заголовок SQLite ("SQLite format 3\0")
     final header = String.fromCharCodes(bytes.take(15));
     if (header != 'SQLite format 3') {
       throw Exception('Этот файл не является резервной копией TransReader (.db)');
@@ -114,7 +133,6 @@ class BookDatabase {
     }
 
     final targetPath = await getDatabaseFilePath();
-    // Удаляем возможные journal/wal хвосты старой базы
     for (final suffix in ['', '-wal', '-shm', '-journal']) {
       final f = File('$targetPath$suffix');
       if (await f.exists()) {
@@ -123,7 +141,6 @@ class BookDatabase {
     }
 
     await File(targetPath).writeAsBytes(bytes, flush: true);
-    // Переоткрываем восстановленную базу
     await database;
     return true;
   }
@@ -212,5 +229,57 @@ class BookDatabase {
       await txn.delete('chapters', where: 'bookId = ?', whereArgs: [bookId]);
       await txn.delete('books', where: 'id = ?', whereArgs: [bookId]);
     });
+  }
+
+  // --- Методы личного словаря ---
+
+  Future<void> addDictionaryEntry(DictionaryEntry entry) async {
+    final db = await database;
+    final cleanSource = entry.sourceText.trim();
+    if (cleanSource.isEmpty) return;
+
+    // Если слово уже есть — обновляем перевод и поднимаем наверх
+    final existing = await db.query(
+      'dictionary',
+      where: 'LOWER(sourceText) = LOWER(?)',
+      whereArgs: [cleanSource],
+    );
+
+    if (existing.isNotEmpty) {
+      await db.update(
+        'dictionary',
+        {
+          'translatedText': entry.translatedText.trim(),
+          'bookTitle': entry.bookTitle,
+          'createdAt': entry.createdAt,
+        },
+        where: 'id = ?',
+        whereArgs: [existing.first['id']],
+      );
+    } else {
+      await db.insert('dictionary', entry.toMap());
+    }
+  }
+
+  Future<List<DictionaryEntry>> getDictionaryEntries({String query = ''}) async {
+    final db = await database;
+    final clean = query.trim();
+    final List> rows;
+    if (clean.isEmpty) {
+      rows = await db.query('dictionary', orderBy: 'createdAt DESC, id DESC');
+    } else {
+      rows = await db.query(
+        'dictionary',
+        where: 'sourceText LIKE ? OR translatedText LIKE ?',
+        whereArgs: ['%$clean%', '%$clean%'],
+        orderBy: 'createdAt DESC, id DESC',
+      );
+    }
+    return rows.map((e) => DictionaryEntry.fromMap(e)).toList();
+  }
+
+  Future<void> deleteDictionaryEntry(int id) async {
+    final db = await database;
+    await db.delete('dictionary', where: 'id = ?', whereArgs: [id]);
   }
 }
