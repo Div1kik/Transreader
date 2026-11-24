@@ -59,7 +59,6 @@ class _SettingsScreenState extends State<SettingsScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Когда пользователь возвращается из браузера с скопированным gsk_ ключом — подхватываем его автоматически
     if (state == AppLifecycleState.resumed && _waitingForGroqKey) {
       _waitingForGroqKey = false;
       _tryPasteGroqKeyFromClipboard(silentIfNotFound: true);
@@ -69,7 +68,11 @@ class _SettingsScreenState extends State<SettingsScreen>
   Future<void> _openGroqKeysPage() async {
     _waitingForGroqKey = true;
     final uri = Uri.parse('https://console.groq.com/keys');
-    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    // Открываем в Chrome Custom Tab — сверху будет крестик «✕» для возврата в 1 тап
+    final launched = await launchUrl(
+      uri,
+      mode: LaunchMode.inAppBrowserView,
+    );
     if (!launched && mounted) {
       _waitingForGroqKey = false;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -174,7 +177,8 @@ class _SettingsScreenState extends State<SettingsScreen>
       if (path != null) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Резервная копия книг и переводов успешно сохранена!'),
+            content:
+                Text('Резервная копия книг и словаря успешно сохранена!'),
           ),
         );
       }
@@ -196,7 +200,7 @@ class _SettingsScreenState extends State<SettingsScreen>
       if (restored) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Библиотека и все переводы успешно восстановлены!'),
+            content: Text('Библиотека и словарь успешно восстановлены!'),
           ),
         );
       }
@@ -264,7 +268,6 @@ class _SettingsScreenState extends State<SettingsScreen>
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          // БЛОК 1: Подключение Groq (основной быстрый движок)
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -295,7 +298,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                   ),
                   const SizedBox(height: 8),
                   const Text(
-                    '1. Откройте сайт Groq и нажмите «Create API Key» → «Copy».\n2. Вернитесь в приложение — ключ gsk_... подхватится сам и настроит все 4 быстрые модели.',
+                    '1. Нажмите кнопку ниже, создайте и скопируйте ключ (gsk_...).\n2. Нажмите крестик «✕» в левом верхнем углу вкладки — ключ подхватится сам.',
                     style: TextStyle(fontSize: 13, color: Color(0xFFA89E93)),
                   ),
                   const SizedBox(height: 14),
@@ -349,7 +352,6 @@ class _SettingsScreenState extends State<SettingsScreen>
 
           const SizedBox(height: 12),
 
-          // БЛОК 2: Встроенный офлайн-переводчик (Google ML Kit)
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -439,7 +441,6 @@ class _SettingsScreenState extends State<SettingsScreen>
 
           const SizedBox(height: 12),
 
-          // БЛОК 3: Резервное копирование библиотеки книг и переводов
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -452,7 +453,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                       const SizedBox(width: 8),
                       const Expanded(
                         child: Text(
-                          'Резервная копия книг и переводов',
+                          'Резервная копия книг и словаря',
                           style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
@@ -463,7 +464,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                   ),
                   const SizedBox(height: 6),
                   const Text(
-                    'Сохраняйте все загруженные книги и готовые переводы в файл .db, чтобы не потерять их при переустановке или смене телефона.',
+                    'Сохраняет все книги, готовые переводы и личный словарь в один файл .db, чтобы не потерять их при переустановке.',
                     style: TextStyle(fontSize: 13, color: Color(0xFFA89E93)),
                   ),
                   const SizedBox(height: 12),
@@ -493,7 +494,6 @@ class _SettingsScreenState extends State<SettingsScreen>
 
           const SizedBox(height: 12),
 
-          // БЛОК 4: Язык перевода
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -511,7 +511,6 @@ class _SettingsScreenState extends State<SettingsScreen>
 
           const SizedBox(height: 12),
 
-          // БЛОК 5: Для продвинутых пользователей (настройка моделей и Endpoint)
           Card(
             child: ExpansionTile(
               initiallyExpanded: _advancedExpanded,
