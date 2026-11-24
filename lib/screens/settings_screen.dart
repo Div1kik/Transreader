@@ -39,9 +39,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _backupBusy = false;
 
   String? _pkceCodeVerifier;
+  String? _lastHandledCode;
   StreamSubscription<Uri>? _linkSub;
 
-  // HTTPS-мостик на GitHub Pages, который сразу переводит в диплинк transreader://callback
   static const String _callbackUrl = 'https://div1kik.github.io/Transreader/';
 
   @override
@@ -76,16 +76,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<void> _handleIncomingUri(Uri? uri) async {
+    if (uri == null) return;
+    if (uri.scheme == 'transreader' && uri.host == 'callback') {
+      final code = uri.queryParameters['code'];
+      if (code != null && code.isNotEmpty && code != _lastHandledCode) {
+        _lastHandledCode = code;
+        await _exchangeOpenRouterCode(code);
+      }
+    }
+  }
+
   void _listenDeepLinks() {
     final appLinks = AppLinks();
-    _linkSub = appLinks.uriLinkStream.listen((uri) async {
-      if (uri.scheme == 'transreader' && uri.host == 'callback') {
-        final code = uri.queryParameters['code'];
-        if (code != null && code.isNotEmpty) {
-          await _exchangeOpenRouterCode(code);
-        }
-      }
-    });
+    appLinks.getInitialLink().then(_handleIncomingUri);
+    _linkSub = appLinks.uriLinkStream.listen(_handleIncomingUri);
   }
 
   String _generateCodeVerifier() {
