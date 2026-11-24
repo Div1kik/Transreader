@@ -1,7 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
-import 'package:flutter/services.dart';
 import '../models/book_models.dart';
 import '../models/reader_theme_settings.dart';
 
@@ -27,6 +26,7 @@ class BookPageView extends StatefulWidget {
   final VoidCallback? onCenterTap;
   final VoidCallback onTranslateHere;
   final ValueChanged<String> onTranslateSelection;
+  final ValueChanged<String> onSaveSelectionToDictionary;
 
   const BookPageView({
     super.key,
@@ -41,6 +41,7 @@ class BookPageView extends StatefulWidget {
     this.onCenterTap,
     required this.onTranslateHere,
     required this.onTranslateSelection,
+    required this.onSaveSelectionToDictionary,
   });
 
   @override
@@ -58,7 +59,6 @@ class _BookPageViewState extends State<BookPageView>
   double _dragProgress = 0.0;
   bool _isDragging = false;
 
-  // Контроль быстрого тапа, чтобы долгое зажатие для выделения не листало страницы
   DateTime? _tapDownTime;
   Offset? _tapDownPos;
   String _selectedText = '';
@@ -102,12 +102,11 @@ class _BookPageViewState extends State<BookPageView>
     TextScaler textScaler,
   ) {
     const horizontalPadding = 20.0;
-    const verticalPadding = 28.0; // верхний отступ + нижний отступ над колонтитулом
-    const footerHeight = 36.0; // высота строки главы и номера страницы + зазор
+    const verticalPadding = 28.0;
+    const footerHeight = 36.0;
 
     final availableWidth =
         (constraints.maxWidth - horizontalPadding * 2).clamp(120.0, 2000.0);
-    // Оставляем дополнительный запас 24px, чтобы текст никогда не касался колонтитула
     final availableHeight =
         (constraints.maxHeight - verticalPadding - footerHeight - 24.0)
             .clamp(140.0, 4000.0);
@@ -246,6 +245,43 @@ class _BookPageViewState extends State<BookPageView>
     }
   }
 
+  Widget _buildCleanContextMenu(
+    BuildContext context,
+    SelectableRegionState selectableRegionState,
+  ) {
+    // Оставляем только стандартные Copy и Select All, убирая системные пункты Android/Samsung/2GIS
+    final baseItems = selectableRegionState.contextMenuButtonItems.where((item) {
+      return item.type == ContextMenuButtonType.copy ||
+          item.type == ContextMenuButtonType.selectAll;
+    }).toList();
+
+    final cleanText = _selectedText.trim();
+    final items = <ContextMenuButtonItem>[
+      if (cleanText.isNotEmpty) ...[
+        ContextMenuButtonItem(
+          label: 'Перевести',
+          onPressed: () {
+            selectableRegionState.hideToolbar();
+            widget.onTranslateSelection(cleanText);
+          },
+        ),
+        ContextMenuButtonItem(
+          label: 'В словарь',
+          onPressed: () {
+            selectableRegionState.hideToolbar();
+            widget.onSaveSelectionToDictionary(cleanText);
+          },
+        ),
+      ],
+      ...baseItems,
+    ];
+
+    return AdaptiveTextSelectionToolbar.buttonItems(
+      anchors: selectableRegionState.contextMenuAnchors,
+      buttonItems: items,
+    );
+  }
+
   Widget _buildSinglePageContent(int pageIndex) {
     if (_pages.isEmpty) {
       return Container(
@@ -269,30 +305,12 @@ class _BookPageViewState extends State<BookPageView>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Область текста с защитной прокруткой, если абзац очень длинный
           Expanded(
             child: SelectionArea(
               onSelectionChanged: (SelectedContent? content) {
                 _selectedText = content?.plainText ?? '';
               },
-              contextMenuBuilder: (context, selectableRegionState) {
-                final items = <ContextMenuButtonItem>[
-                  ...selectableRegionState.contextMenuButtonItems,
-                  if (_selectedText.trim().isNotEmpty)
-                    ContextMenuButtonItem(
-                      label: 'Перевести',
-                      onPressed: () {
-                        final toTranslate = _selectedText.trim();
-                        selectableRegionState.hideToolbar();
-                        widget.onTranslateSelection(toTranslate);
-                      },
-                    ),
-                ];
-                return AdaptiveTextSelectionToolbar.buttonItems(
-                  anchors: selectableRegionState.contextMenuAnchors,
-                  buttonItems: items,
-                );
-              },
+              contextMenuBuilder: _buildCleanContextMenu,
               child: SingleChildScrollView(
                 physics: const ClampingScrollPhysics(),
                 padding: const EdgeInsets.only(bottom: 12),
@@ -322,7 +340,6 @@ class _BookPageViewState extends State<BookPageView>
               ),
             ),
           ),
-          // Фиксированный нижний колонтитул с чётким отступом сверху
           Container(
             padding: const EdgeInsets.only(top: 6),
             decoration: BoxDecoration(
@@ -608,7 +625,6 @@ class _BookPageViewState extends State<BookPageView>
             _tapDownPos = null;
 
             if (downTime == null || downPos == null) return;
-            // Игнорируем долгие зажатия (> 240 мс) и движения пальца, чтобы не было ложных перелистываний при выделении текста
             final elapsed = DateTime.now().difference(downTime).inMilliseconds;
             final distance = (event.position - downPos).distance;
             if (elapsed > 240 || distance > 14.0) return;
