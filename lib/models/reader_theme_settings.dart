@@ -14,6 +14,12 @@ enum ReaderPageMode {
   pageCurl,
 }
 
+enum ReaderTextDisplay {
+  translationOnly,
+  bilingual,
+  originalOnly,
+}
+
 class ReaderPalette {
   final String name;
   final Color background;
@@ -82,48 +88,55 @@ class ReaderPalette {
 class ReaderAppearance {
   final ReaderColorTheme colorTheme;
   final ReaderPageMode pageMode;
+  final ReaderTextDisplay textDisplay;
   final double fontSize;
   final double lineHeight;
-  final bool showOriginal;
 
   const ReaderAppearance({
-    this.colorTheme = ReaderColorTheme.dark,
+    this.colorTheme = ReaderColorTheme.sepia,
     this.pageMode = ReaderPageMode.pageCurl,
+    this.textDisplay = ReaderTextDisplay.translationOnly,
     this.fontSize = 18.0,
     this.lineHeight = 1.55,
-    this.showOriginal = false,
   });
+
+  bool get showOriginal => textDisplay == ReaderTextDisplay.bilingual;
+  bool get isOriginalOnly => textDisplay == ReaderTextDisplay.originalOnly;
 
   ReaderAppearance copyWith({
     ReaderColorTheme? colorTheme,
     ReaderPageMode? pageMode,
+    ReaderTextDisplay? textDisplay,
     double? fontSize,
     double? lineHeight,
-    bool? showOriginal,
   }) {
     return ReaderAppearance(
       colorTheme: colorTheme ?? this.colorTheme,
       pageMode: pageMode ?? this.pageMode,
+      textDisplay: textDisplay ?? this.textDisplay,
       fontSize: fontSize ?? this.fontSize,
       lineHeight: lineHeight ?? this.lineHeight,
-      showOriginal: showOriginal ?? this.showOriginal,
     );
   }
 
   static Future<ReaderAppearance> load() async {
     final prefs = await SharedPreferences.getInstance();
     final themeIdx =
-        prefs.getInt('reader_color_theme') ?? ReaderColorTheme.dark.index;
+        prefs.getInt('reader_color_theme') ?? ReaderColorTheme.sepia.index;
     final modeIdx =
         prefs.getInt('reader_page_mode') ?? ReaderPageMode.pageCurl.index;
+    final displayIdx = prefs.getInt('reader_text_display') ??
+        ReaderTextDisplay.translationOnly.index;
+
     return ReaderAppearance(
       colorTheme: ReaderColorTheme
           .values[themeIdx.clamp(0, ReaderColorTheme.values.length - 1)],
       pageMode: ReaderPageMode
           .values[modeIdx.clamp(0, ReaderPageMode.values.length - 1)],
+      textDisplay: ReaderTextDisplay
+          .values[displayIdx.clamp(0, ReaderTextDisplay.values.length - 1)],
       fontSize: prefs.getDouble('reader_font_size') ?? 18.0,
       lineHeight: prefs.getDouble('reader_line_height') ?? 1.55,
-      showOriginal: prefs.getBool('reader_show_original') ?? false,
     );
   }
 
@@ -131,8 +144,8 @@ class ReaderAppearance {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt('reader_color_theme', colorTheme.index);
     await prefs.setInt('reader_page_mode', pageMode.index);
+    await prefs.setInt('reader_text_display', textDisplay.index);
     await prefs.setDouble('reader_font_size', fontSize);
-    await prefs.setDouble('reader_line_height', lineHeight);
-    await prefs.setBool('reader_show_original', showOriginal);
+    await prefs.setDouble('reader_lineHeight', lineHeight);
   }
 }
