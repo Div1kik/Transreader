@@ -219,11 +219,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
         builder: (_) => SettingsScreen(initialSettings: _settings),
       ),
     );
-    if (updated != null && mounted) {
+    if (!mounted) return;
+    if (updated != null) {
       _translatorService.settings = updated;
       _queueController.updateSettings(updated);
       setState(() => _settings = updated);
     }
+    // Всегда обновляем библиотеку после возврата (на случай восстановления бэкапа)
+    await _reloadBooks();
   }
 
   void _openBook(Book book) {
