@@ -113,3 +113,39 @@ class ParagraphItem {
     );
   }
 }
+
+class DictionaryEntry {
+  final int? id;
+  final String sourceText;
+  final String translatedText;
+  final String bookTitle;
+  final int createdAt;
+
+  const DictionaryEntry({
+    this.id,
+    required this.sourceText,
+    required this.translatedText,
+    required this.bookTitle,
+    required this.createdAt,
+  });
+
+  Map<String, dynamic> toMap() {
+    return {
+      if (id != null) 'id': id,
+      'sourceText': sourceText,
+      'translatedText': translatedText,
+      'bookTitle': bookTitle,
+      'createdAt': createdAt,
+    };
+  }
+
+  factory DictionaryEntry.fromMap(Map<String, dynamic> map) {
+    return DictionaryEntry(
+      id: map['id'] as int?,
+      sourceText: map['sourceText'] as String,
+      translatedText: map['translatedText'] as String,
+      bookTitle: (map['bookTitle'] as String?) ?? '',
+      createdAt: (map['createdAt'] as int?) ?? 0,
+    );
+  }
+}
