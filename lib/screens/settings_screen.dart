@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
+import '../db/book_database.dart';
 import '../services/offline_translator_service.dart';
 import '../services/settings_service.dart';
 
@@ -35,8 +36,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _authInProgress = false;
   bool _downloadingOfflineModel = false;
   bool _offlineModelReady = false;
+  bool _backupBusy = false;
 
-  // PKCE verifier для OpenRouter OAuth
   String? _pkceCodeVerifier;
   StreamSubscription<Uri>? _linkSub;
 
@@ -190,7 +191,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Офлайн-модель скачана! Теперь можно переводить без интернета.'),
+          content:
+              Text('Офлайн-модель скачана! Теперь можно переводить без интернета.'),
         ),
       );
     } catch (e) {
@@ -202,6 +204,50 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (mounted) {
         setState(() => _downloadingOfflineModel = false);
       }
+    }
+  }
+
+  Future<void> _handleExportBackup() async {
+    setState(() => _backupBusy = true);
+    try {
+      final path = await BookDatabase.instance.exportBackup();
+      if (!mounted) return;
+      if (path != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Резервная копия книг и переводов успешно сохранена!'),
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка экспорта: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _backupBusy = false);
+    }
+  }
+
+  Future<void> _handleImportBackup() async {
+    setState(() => _backupBusy = true);
+    try {
+      final restored = await BookDatabase.instance.importBackup();
+      if (!mounted) return;
+      if (restored) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Библиотека и все переводы успешно восстановлены!'),
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка восстановления: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _backupBusy = false);
     }
   }
 
@@ -416,7 +462,61 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           const SizedBox(height: 12),
 
-          // БЛОК 3: Язык перевода
+          // БЛОК 3: Резервное копирование библиотеки книг и переводов
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.backup_outlined, color: accent),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'Резервная копия книг и переводов',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Сохраняйте все загруженные книги и готовые переводы в файл .db, чтобы не потерять их при переустановке или смене телефона.',
+                    style: TextStyle(fontSize: 13, color: Color(0xFFA89E93)),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _backupBusy ? null : _handleExportBackup,
+                          icon: const Icon(Icons.upload_file, size: 18),
+                          label: const Text('Сохранить копию'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _backupBusy ? null : _handleImportBackup,
+                          icon: const Icon(Icons.restore_page, size: 18),
+                          label: const Text('Восстановить'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 12),
+
+          // БЛОК 4: Язык перевода
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -434,7 +534,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           const SizedBox(height: 12),
 
-          // БЛОК 4: Для продвинутых пользователей (ручной ввод API)
+          // БЛОК 5: Для продвинутых пользователей (ручной ввод API)
           Card(
             child: ExpansionTile(
               initiallyExpanded: _advancedExpanded,
@@ -490,8 +590,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       const SizedBox(height: 12),
                       TextField(
                         controller: _endpointController,
-                        onChanged: (_) => _engineMode =
-                            TranslationEngineMode.customApi,
+                        onChanged: (_) =>
+                            _engineMode = TranslationEngineMode.customApi,
                         decoration: const InputDecoration(
                           labelText: 'API Endpoint URL',
                           border: OutlineInputBorder(),
@@ -501,8 +601,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       TextField(
                         controller: _apiKeyController,
                         obscureText: _obscureKey,
-                        onChanged: (_) => _engineMode =
-                            TranslationEngineMode.customApi,
+                        onChanged: (_) =>
+                            _engineMode = TranslationEngineMode.customApi,
                         decoration: InputDecoration(
                           labelText: 'API Key',
                           border: const OutlineInputBorder(),
