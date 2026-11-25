@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:google_mlkit_translation/google_mlkit_translation.dart';
 import 'package:http/http.dart' as http;
 import 'offline_translator_service.dart';
 import 'settings_service.dart';
@@ -49,6 +50,10 @@ class TranslatorService {
     return minSec == 999999 ? 0 : minSec;
   }
 
+  bool _isCyrillic(String text) {
+    return RegExp(r'[а-яА-ЯёЁ]').hasMatch(text);
+  }
+
   /// Быстрый перевод выделенного слова или фразы (в поп-апе при выделении)
   Future<String> translateSelection({
     required String selectedText,
@@ -57,11 +62,17 @@ class TranslatorService {
     final clean = selectedText.trim();
     if (clean.isEmpty) return '';
 
+    final sourceLang = _isCyrillic(clean)
+        ? TranslateLanguage.russian
+        : TranslateLanguage.english;
+    final effectiveTarget = _isCyrillic(clean) ? 'English' : targetLanguage;
+
     if (settings.engineMode == TranslationEngineMode.offlineLocal ||
         settings.apiKey.trim().isEmpty) {
       return OfflineTranslatorService.instance.translateText(
         clean,
-        targetLanguage: targetLanguage,
+        source: sourceLang,
+        targetLanguage: effectiveTarget,
       );
     }
 
@@ -69,15 +80,97 @@ class TranslatorService {
       final translated = await translateBatch(
         paragraphs: [clean],
         previousContext: const [],
-        targetLanguage: targetLanguage,
+        targetLanguage: effectiveTarget,
       );
       return translated.isNotEmpty ? translated.first : '';
     } catch (_) {
-      // Если сеть/лимит недоступны — мгновенно страхуем офлайн-моделью
       return OfflineTranslatorService.instance.translateText(
         clean,
-        targetLanguage: targetLanguage,
+        source: sourceLang,
+        targetLanguage: effectiveTarget,
       );
+    }
+  }
+
+  /// Контекстный поиск точного парного слова в соседнем абзаце (работает в обе стороны: EN->RU и RU->EN)
+  Future<String> findCounterpartWordInContext({
+    required String tappedWord,
+    required String sourceParagraph,
+    required String targetParagraph,
+    required double relativePosition,
+  }) async {
+    final cleanWord = tappedWord.trim();
+    if (cleanWord.isEmpty) return '';
+
+    final isRussianTap = _isCyrillic(cleanWord);
+
+    // 1. Если доступен онлайн-ключ (Groq / Custom API), просим модель выбрать ОДНО точное слово прямо из targetParagraph
+    if (settings.engineMode != TranslationEngineMode.offlineLocal &&
+        settings.apiKey.trim().isNotEmpty) {
+      try {
+        final pool = settings.activeModelPool
+            .where((m) => !isModelCoolingDown(m))
+            .toList();
+        if (pool.isNotEmpty) {
+          final model = pool.first;
+          final pct = (relativePosition * 100).round();
+          final response = await http
+              .post(
+                Uri.parse(settings.endpointUrl),
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Accept': 'application/json',
+                  'Authorization': 'Bearer ${settings.apiKey}',
+                },
+                body: jsonEncode({
+                  'model': model,
+                  'temperature': 0.0,
+                  'max_tokens': 24,
+                  'messages': [
+                    {
+                      'role': 'system',
+                      'content':
+                          'You are a bilingual word-alignment engine. Given a tapped word in a source paragraph (at roughly $pct% through the text) and its translated counterpart paragraph, output ONLY the single exact matching word from the target paragraph. No punctuation, no explanations, just that one word.',
+                    },
+                    {
+                      'role': 'user',
+                      'content':
+                          'Tapped word: "$cleanWord"\nSource paragraph: "$sourceParagraph"\nTarget paragraph: "$targetParagraph"\nExact matching word from Target paragraph:',
+                    },
+                  ],
+                }),
+              )
+              .timeout(const Duration(seconds: 8));
+
+          if (response.statusCode >= 200 && response.statusCode < 300) {
+            final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+            final rawReply =
+                decoded['choices']?[0]?['message']?['content']?.toString() ??
+                    '';
+            final cleanedReply = rawReply
+                .trim()
+                .replaceAll(RegExp(r'^["«“„]+|["»”„.,!?;:]+$'), '');
+            if (cleanedReply.isNotEmpty) {
+              return cleanedReply;
+            }
+          }
+        }
+      } catch (_) {
+        // При любой сетевой задержке мгновенно переходим к локальному переводу слова
+      }
+    }
+
+    // 2. Офлайн-перевод слова в нужном направлении (RU->EN или EN->RU)
+    try {
+      return await OfflineTranslatorService.instance.translateText(
+        cleanWord,
+        source: isRussianTap
+            ? TranslateLanguage.russian
+            : TranslateLanguage.english,
+        targetLanguage: isRussianTap ? 'English' : settings.targetLanguage,
+      );
+    } catch (_) {
+      return '';
     }
   }
 
@@ -89,7 +182,6 @@ class TranslatorService {
   }) async {
     if (paragraphs.isEmpty) return [];
 
-    // 1. Встроенный офлайн-режим (Google ML Kit)
     if (settings.engineMode == TranslationEngineMode.offlineLocal) {
       onModelSelected?.call('Offline ML Kit');
       final results = <String>[];
@@ -103,10 +195,9 @@ class TranslatorService {
       return results;
     }
 
-    // 2. LLM-режим (OpenRouter 1-клик или свой API)
     if (settings.apiKey.trim().isEmpty) {
       throw Exception(
-        'Не подключён переводчик: нажмите «Подключить в 1 клик» или включите офлайн-модель в настройках',
+        'Не подключён переводчик: вставьте ключ Groq или включите офлайн-модель в настройках',
       );
     }
 
