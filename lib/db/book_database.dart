@@ -76,7 +76,6 @@ class BookDatabase {
         }
       },
       onOpen: (db) async {
-        // Гарантируем наличие таблицы словаря даже при восстановлении старого v1 бэкапа
         await _ensureDictionaryTable(db);
       },
     );
@@ -231,14 +230,11 @@ class BookDatabase {
     });
   }
 
-  // --- Методы личного словаря ---
-
   Future<void> addDictionaryEntry(DictionaryEntry entry) async {
     final db = await database;
     final cleanSource = entry.sourceText.trim();
     if (cleanSource.isEmpty) return;
 
-    // Если слово уже есть — обновляем перевод и поднимаем наверх
     final existing = await db.query(
       'dictionary',
       where: 'LOWER(sourceText) = LOWER(?)',
@@ -264,17 +260,14 @@ class BookDatabase {
   Future<List<DictionaryEntry>> getDictionaryEntries({String query = ''}) async {
     final db = await database;
     final clean = query.trim();
-    final List> rows;
-    if (clean.isEmpty) {
-      rows = await db.query('dictionary', orderBy: 'createdAt DESC, id DESC');
-    } else {
-      rows = await db.query(
-        'dictionary',
-        where: 'sourceText LIKE ? OR translatedText LIKE ?',
-        whereArgs: ['%$clean%', '%$clean%'],
-        orderBy: 'createdAt DESC, id DESC',
-      );
-    }
+    final rows = clean.isEmpty
+        ? await db.query('dictionary', orderBy: 'createdAt DESC, id DESC')
+        : await db.query(
+            'dictionary',
+            where: 'sourceText LIKE ? OR translatedText LIKE ?',
+            whereArgs: ['%$clean%', '%$clean%'],
+            orderBy: 'createdAt DESC, id DESC',
+          );
     return rows.map((e) => DictionaryEntry.fromMap(e)).toList();
   }
 
