@@ -37,19 +37,54 @@ class _ReaderScreenState extends State<ReaderScreen> {
   bool _showControls = true;
   String _scrollSelectedText = '';
 
-  // Кэш переведённых слов в рамках сессии для мгновенной подсветки в билингве
   final Map<String, String> _wordLookupCache = {};
 
-  // Состояние подсветки для режима «Прокрутка»
   int? _scrollHighlightOrder;
-  String? _scrollHighlightSource;
-  String? _scrollHighlightTranslated;
+  int? _scrollHighlightSourceToken;
+  int? _scrollHighlightTranslatedToken;
 
   ReaderAppearance _appearance = const ReaderAppearance();
 
   TranslateMode _selectedMode = TranslateMode.nextChapters;
   int _chaptersAhead = 3;
   StreamSubscription<TranslationProgress>? _progressSub;
+
+  static const Map<String, List<String>> _pronounHints = {
+    'его': ['his', 'him', 'its', 'it'],
+    'её': ['her', 'hers', 'its', 'it'],
+    'ее': ['her', 'hers', 'its', 'it'],
+    'их': ['their', 'theirs', 'them', 'they'],
+    'он': ['he', 'it'],
+    'она': ['she', 'it'],
+    'оно': ['it'],
+    'они': ['they', 'them'],
+    'я': ['i', 'me'],
+    'мне': ['me', 'i'],
+    'меня': ['me', 'my'],
+    'мой': ['my', 'mine'],
+    'моя': ['my', 'mine'],
+    'мы': ['we', 'us'],
+    'нас': ['us', 'we'],
+    'наш': ['our', 'ours'],
+    'ты': ['you'],
+    'вы': ['you'],
+    'вас': ['you'],
+    'ваш': ['your', 'yours'],
+    'твой': ['your', 'yours'],
+    'это': ['it', 'this', 'that'],
+    'этот': ['this', 'that'],
+    'тот': ['that', 'those'],
+    'his': ['его', 'свой', 'свою', 'своего'],
+    'him': ['его', 'ему', 'ним'],
+    'her': ['её', 'ее', 'ей', 'свою'],
+    'their': ['их', 'свои', 'своих'],
+    'them': ['их', 'им', 'ними'],
+    'it': ['это', 'его', 'её', 'ее', 'он', 'она', 'оно'],
+    'its': ['его', 'её', 'ее', 'свой'],
+    'he': ['он'],
+    'she': ['она'],
+    'they': ['они'],
+  };
 
   @override
   void initState() {
@@ -91,8 +126,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _currentPageInChapter = startPage;
       _loadingChapter = true;
       _scrollHighlightOrder = null;
-      _scrollHighlightSource = null;
-      _scrollHighlightTranslated = null;
+      _scrollHighlightSourceToken = null;
+      _scrollHighlightTranslatedToken = null;
     });
     final items = await BookDatabase.instance.getChapterParagraphs(
       widget.book.id,
@@ -130,16 +165,26 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
-  Future<String> _lookupWordTranslation(String word) async {
-    final key = word.trim().toLowerCase();
-    if (_wordLookupCache.containsKey(key)) {
-      return _wordLookupCache[key]!;
+  Future<String> _lookupWordInContext({
+    required String tappedWord,
+    required String sourceParagraph,
+    required String targetParagraph,
+    required double relativePosition,
+  }) async {
+    final cacheKey =
+        '${tappedWord.toLowerCase()}_${sourceParagraph.hashCode}_${(relativePosition * 10).round()}';
+    if (_wordLookupCache.containsKey(cacheKey)) {
+      return _wordLookupCache[cacheKey]!;
     }
-    final res = await widget.translatorService.translateSelection(
-      selectedText: key,
-      targetLanguage: widget.targetLanguage,
+    final res = await widget.translatorService.findCounterpartWordInContext(
+      tappedWord: tappedWord,
+      sourceParagraph: sourceParagraph,
+      targetParagraph: targetParagraph,
+      relativePosition: relativePosition,
     );
-    _wordLookupCache[key] = res;
+    if (res.isNotEmpty) {
+      _wordLookupCache[cacheKey] = res;
+    }
     return res;
   }
 
@@ -699,44 +744,57 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
-  String _normalizeWord(String raw) {
-    return raw.toLowerCase().replaceAll(RegExp(r"[^\p{L}\p{N}'’-]", unicode: true), '');
-  }
-
-  String? _findBestMatch(
-    String targetParagraph,
-    String candidateTranslation,
-    double relativePosition,
-  ) {
-    final candidateWords = candidateTranslation
-        .split(RegExp(r'\s+'))
-        .map(_normalizeWord)
-        .where((w) => w.length >= 2)
-        .toList();
-
-    final paragraphWords = RegExp(r"[\p{L}\p{N}'’-]+", unicode: true)
-        .allMatches(targetParagraph)
+  List<String> _tokenize(String text) {
+    return RegExp(r"([\p{L}\p{N}'’-]+|[^\p{L}\p{N}'’-]+)", unicode: true)
+        .allMatches(text)
         .map((m) => m.group(0)!)
         .toList();
+  }
 
-    if (paragraphWords.isEmpty || candidateWords.isEmpty) return null;
+  String _normalizeWord(String raw) {
+    return raw
+        .toLowerCase()
+        .replaceAll(RegExp(r"[^\p{L}\p{N}'’-]", unicode: true), '');
+  }
 
-    String? bestWord;
+  int? _findBestMatchToken({
+    required String targetParagraph,
+    required String tappedNormWord,
+    required String candidateTranslation,
+    required double relativePosition,
+  }) {
+    final tokens = _tokenize(targetParagraph);
+    if (tokens.isEmpty) return null;
+
+    final candidates = <String>[
+      ...candidateTranslation
+          .split(RegExp(r'\s+'))
+          .map(_normalizeWord)
+          .where((w) => w.isNotEmpty),
+      ...(_pronounHints[tappedNormWord] ?? const []),
+    ];
+
+    if (candidates.isEmpty) return null;
+
+    int? bestIdx;
     double bestScore = -1.0;
 
-    for (int i = 0; i < paragraphWords.length; i++) {
-      final normW = _normalizeWord(paragraphWords[i]);
-      if (normW.length < 2) continue;
+    for (int i = 0; i < tokens.length; i++) {
+      final normW = _normalizeWord(tokens[i]);
+      if (normW.isEmpty) continue;
 
-      final posRatio = i / paragraphWords.length;
-      final posPenalty = (posRatio - relativePosition).abs() * 0.35;
+      final posRatio = i / tokens.length;
+      final posPenalty = (posRatio - relativePosition).abs() * 1.4;
 
-      for (final cand in candidateWords) {
+      for (int cIdx = 0; cIdx < candidates.length; cIdx++) {
+        final cand = candidates[cIdx];
+        final candBonus = cIdx == 0 ? 0.3 : 0.0;
+
         if (normW == cand) {
-          final score = 10.0 - posPenalty;
+          final score = 10.0 + candBonus - posPenalty;
           if (score > bestScore) {
             bestScore = score;
-            bestWord = normW;
+            bestIdx = i;
           }
         } else {
           final minLen = math.min(normW.length, cand.length);
@@ -748,10 +806,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
             }
             final ratio = commonPrefix / math.max(normW.length, cand.length);
             if (ratio >= 0.58) {
-              final score = ratio * 6.0 - posPenalty;
+              final score = ratio * 6.0 + candBonus - posPenalty;
               if (score > bestScore) {
                 bestScore = score;
-                bestWord = normW;
+                bestIdx = i;
               }
             }
           }
@@ -759,25 +817,27 @@ class _ReaderScreenState extends State<ReaderScreen> {
       }
     }
 
-    return bestWord;
+    return bestIdx;
   }
 
   Future<void> _onScrollWordTap({
     required ParagraphItem paragraph,
+    required int tokenIndex,
     required String rawWord,
     required bool isOriginalText,
     required double relPos,
   }) async {
     final cleanWord = _normalizeWord(rawWord);
-    if (cleanWord.length < 2 || !paragraph.isTranslated) return;
+    if (cleanWord.isEmpty || !paragraph.isTranslated) return;
 
     if (_scrollHighlightOrder == paragraph.orderIndex &&
-        ((isOriginalText && _scrollHighlightSource == cleanWord) ||
-            (!isOriginalText && _scrollHighlightTranslated == cleanWord))) {
+        ((isOriginalText && _scrollHighlightSourceToken == tokenIndex) ||
+            (!isOriginalText &&
+                _scrollHighlightTranslatedToken == tokenIndex))) {
       setState(() {
         _scrollHighlightOrder = null;
-        _scrollHighlightSource = null;
-        _scrollHighlightTranslated = null;
+        _scrollHighlightSourceToken = null;
+        _scrollHighlightTranslatedToken = null;
       });
       return;
     }
@@ -785,28 +845,41 @@ class _ReaderScreenState extends State<ReaderScreen> {
     setState(() {
       _scrollHighlightOrder = paragraph.orderIndex;
       if (isOriginalText) {
-        _scrollHighlightSource = cleanWord;
-        _scrollHighlightTranslated = null;
+        _scrollHighlightSourceToken = tokenIndex;
+        _scrollHighlightTranslatedToken = null;
       } else {
-        _scrollHighlightTranslated = cleanWord;
-        _scrollHighlightSource = null;
+        _scrollHighlightTranslatedToken = tokenIndex;
+        _scrollHighlightSourceToken = null;
       }
     });
 
+    final sourceText =
+        isOriginalText ? paragraph.sourceText : paragraph.translatedText!;
+    final targetText =
+        isOriginalText ? paragraph.translatedText! : paragraph.sourceText;
+
     try {
-      final candidate = await _lookupWordTranslation(cleanWord);
+      final candidate = await _lookupWordInContext(
+        tappedWord: cleanWord,
+        sourceParagraph: sourceText,
+        targetParagraph: targetText,
+        relativePosition: relPos,
+      );
       if (!mounted) return;
       if (_scrollHighlightOrder != paragraph.orderIndex) return;
 
-      final counterpart =
-          isOriginalText ? paragraph.translatedText! : paragraph.sourceText;
-      final matched = _findBestMatch(counterpart, candidate, relPos);
-      if (matched != null) {
+      final matchedToken = _findBestMatchToken(
+        targetParagraph: targetText,
+        tappedNormWord: cleanWord,
+        candidateTranslation: candidate,
+        relativePosition: relPos,
+      );
+      if (matchedToken != null) {
         setState(() {
           if (isOriginalText) {
-            _scrollHighlightTranslated = matched;
+            _scrollHighlightTranslatedToken = matchedToken;
           } else {
-            _scrollHighlightSource = matched;
+            _scrollHighlightSourceToken = matchedToken;
           }
         });
       }
@@ -820,27 +893,24 @@ class _ReaderScreenState extends State<ReaderScreen> {
     required TextStyle baseStyle,
     required bool isOriginalText,
   }) {
-    final activeWord = _scrollHighlightOrder == paragraph.orderIndex
+    final activeToken = _scrollHighlightOrder == paragraph.orderIndex
         ? (isOriginalText
-            ? _scrollHighlightSource
-            : _scrollHighlightTranslated)
+            ? _scrollHighlightSourceToken
+            : _scrollHighlightTranslatedToken)
         : null;
 
     final markerColor = palette.brightness == Brightness.dark
         ? const Color(0xFFD98A3C).withOpacity(0.38)
-        : const Color(0xFFFFD54F).withOpacity(0.75);
+        : const Color(0xFFFFD54F).withOpacity(0.78);
 
-    final tokens = RegExp(r"([\p{L}\p{N}'’-]+|[^\p{L}\p{N}'’-]+)", unicode: true)
-        .allMatches(text)
-        .map((m) => m.group(0)!)
-        .toList();
-
+    final tokens = _tokenize(text);
     final spans = <InlineSpan>[];
+
     for (int i = 0; i < tokens.length; i++) {
       final token = tokens[i];
       final norm = _normalizeWord(token);
       final isWord = norm.isNotEmpty;
-      final isHighlighted = isWord && activeWord != null && norm == activeWord;
+      final isHighlighted = isWord && activeToken != null && i == activeToken;
 
       if (!isWord) {
         spans.add(TextSpan(text: token));
@@ -858,6 +928,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
             recognizer: TapGestureRecognizer()
               ..onTap = () => _onScrollWordTap(
                     paragraph: paragraph,
+                    tokenIndex: i,
                     rawWord: token,
                     isOriginalText: isOriginalText,
                     relPos: relPos,
@@ -1141,7 +1212,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                           onTranslateSelection: _showSelectionTranslationSheet,
                           onSaveSelectionToDictionary:
                               _saveToDictionaryDirectly,
-                          onLookupWord: _lookupWordTranslation,
+                          onLookupWordInContext: _lookupWordInContext,
                         ),
             ),
           ],
