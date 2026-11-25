@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:math' as math;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import '../db/book_database.dart';
@@ -34,6 +36,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
   bool _loadingChapter = true;
   bool _showControls = true;
   String _scrollSelectedText = '';
+
+  // Кэш переведённых слов в рамках сессии для мгновенной подсветки в билингве
+  final Map<String, String> _wordLookupCache = {};
+
+  // Состояние подсветки для режима «Прокрутка»
+  int? _scrollHighlightOrder;
+  String? _scrollHighlightSource;
+  String? _scrollHighlightTranslated;
 
   ReaderAppearance _appearance = const ReaderAppearance();
 
@@ -80,6 +90,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _currentChapterIndex = safeIdx;
       _currentPageInChapter = startPage;
       _loadingChapter = true;
+      _scrollHighlightOrder = null;
+      _scrollHighlightSource = null;
+      _scrollHighlightTranslated = null;
     });
     final items = await BookDatabase.instance.getChapterParagraphs(
       widget.book.id,
@@ -115,6 +128,19 @@ class _ReaderScreenState extends State<ReaderScreen> {
       chaptersAhead: overrideAhead ?? _chaptersAhead,
       targetLanguage: widget.targetLanguage,
     );
+  }
+
+  Future<String> _lookupWordTranslation(String word) async {
+    final key = word.trim().toLowerCase();
+    if (_wordLookupCache.containsKey(key)) {
+      return _wordLookupCache[key]!;
+    }
+    final res = await widget.translatorService.translateSelection(
+      selectedText: key,
+      targetLanguage: widget.targetLanguage,
+    );
+    _wordLookupCache[key] = res;
+    return res;
   }
 
   Future<void> _saveToDictionaryDirectly(String selectedText) async {
@@ -673,6 +699,177 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
+  String _normalizeWord(String raw) {
+    return raw.toLowerCase().replaceAll(RegExp(r"[^\p{L}\p{N}'’-]", unicode: true), '');
+  }
+
+  String? _findBestMatch(
+    String targetParagraph,
+    String candidateTranslation,
+    double relativePosition,
+  ) {
+    final candidateWords = candidateTranslation
+        .split(RegExp(r'\s+'))
+        .map(_normalizeWord)
+        .where((w) => w.length >= 2)
+        .toList();
+
+    final paragraphWords = RegExp(r"[\p{L}\p{N}'’-]+", unicode: true)
+        .allMatches(targetParagraph)
+        .map((m) => m.group(0)!)
+        .toList();
+
+    if (paragraphWords.isEmpty || candidateWords.isEmpty) return null;
+
+    String? bestWord;
+    double bestScore = -1.0;
+
+    for (int i = 0; i < paragraphWords.length; i++) {
+      final normW = _normalizeWord(paragraphWords[i]);
+      if (normW.length < 2) continue;
+
+      final posRatio = i / paragraphWords.length;
+      final posPenalty = (posRatio - relativePosition).abs() * 0.35;
+
+      for (final cand in candidateWords) {
+        if (normW == cand) {
+          final score = 10.0 - posPenalty;
+          if (score > bestScore) {
+            bestScore = score;
+            bestWord = normW;
+          }
+        } else {
+          final minLen = math.min(normW.length, cand.length);
+          if (minLen >= 3) {
+            int commonPrefix = 0;
+            while (commonPrefix < minLen &&
+                normW[commonPrefix] == cand[commonPrefix]) {
+              commonPrefix++;
+            }
+            final ratio = commonPrefix / math.max(normW.length, cand.length);
+            if (ratio >= 0.58) {
+              final score = ratio * 6.0 - posPenalty;
+              if (score > bestScore) {
+                bestScore = score;
+                bestWord = normW;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return bestWord;
+  }
+
+  Future<void> _onScrollWordTap({
+    required ParagraphItem paragraph,
+    required String rawWord,
+    required bool isOriginalText,
+    required double relPos,
+  }) async {
+    final cleanWord = _normalizeWord(rawWord);
+    if (cleanWord.length < 2 || !paragraph.isTranslated) return;
+
+    if (_scrollHighlightOrder == paragraph.orderIndex &&
+        ((isOriginalText && _scrollHighlightSource == cleanWord) ||
+            (!isOriginalText && _scrollHighlightTranslated == cleanWord))) {
+      setState(() {
+        _scrollHighlightOrder = null;
+        _scrollHighlightSource = null;
+        _scrollHighlightTranslated = null;
+      });
+      return;
+    }
+
+    setState(() {
+      _scrollHighlightOrder = paragraph.orderIndex;
+      if (isOriginalText) {
+        _scrollHighlightSource = cleanWord;
+        _scrollHighlightTranslated = null;
+      } else {
+        _scrollHighlightTranslated = cleanWord;
+        _scrollHighlightSource = null;
+      }
+    });
+
+    try {
+      final candidate = await _lookupWordTranslation(cleanWord);
+      if (!mounted) return;
+      if (_scrollHighlightOrder != paragraph.orderIndex) return;
+
+      final counterpart =
+          isOriginalText ? paragraph.translatedText! : paragraph.sourceText;
+      final matched = _findBestMatch(counterpart, candidate, relPos);
+      if (matched != null) {
+        setState(() {
+          if (isOriginalText) {
+            _scrollHighlightTranslated = matched;
+          } else {
+            _scrollHighlightSource = matched;
+          }
+        });
+      }
+    } catch (_) {}
+  }
+
+  Widget _buildScrollInteractiveText({
+    required ReaderPalette palette,
+    required ParagraphItem paragraph,
+    required String text,
+    required TextStyle baseStyle,
+    required bool isOriginalText,
+  }) {
+    final activeWord = _scrollHighlightOrder == paragraph.orderIndex
+        ? (isOriginalText
+            ? _scrollHighlightSource
+            : _scrollHighlightTranslated)
+        : null;
+
+    final markerColor = palette.brightness == Brightness.dark
+        ? const Color(0xFFD98A3C).withOpacity(0.38)
+        : const Color(0xFFFFD54F).withOpacity(0.75);
+
+    final tokens = RegExp(r"([\p{L}\p{N}'’-]+|[^\p{L}\p{N}'’-]+)", unicode: true)
+        .allMatches(text)
+        .map((m) => m.group(0)!)
+        .toList();
+
+    final spans = <InlineSpan>[];
+    for (int i = 0; i < tokens.length; i++) {
+      final token = tokens[i];
+      final norm = _normalizeWord(token);
+      final isWord = norm.isNotEmpty;
+      final isHighlighted = isWord && activeWord != null && norm == activeWord;
+
+      if (!isWord) {
+        spans.add(TextSpan(text: token));
+      } else {
+        final relPos = tokens.isEmpty ? 0.5 : i / tokens.length;
+        spans.add(
+          TextSpan(
+            text: token,
+            style: isHighlighted
+                ? baseStyle.copyWith(
+                    backgroundColor: markerColor,
+                    fontWeight: FontWeight.w600,
+                  )
+                : null,
+            recognizer: TapGestureRecognizer()
+              ..onTap = () => _onScrollWordTap(
+                    paragraph: paragraph,
+                    rawWord: token,
+                    isOriginalText: isOriginalText,
+                    relPos: relPos,
+                  ),
+          ),
+        );
+      }
+    }
+
+    return Text.rich(TextSpan(style: baseStyle, children: spans));
+  }
+
   @override
   void dispose() {
     _progressSub?.cancel();
@@ -944,6 +1141,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                           onTranslateSelection: _showSelectionTranslationSheet,
                           onSaveSelectionToDictionary:
                               _saveToDictionaryDirectly,
+                          onLookupWord: _lookupWordTranslation,
                         ),
             ),
           ],
@@ -970,12 +1168,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
         _scrollSelectedText = content?.plainText ?? '';
       },
       contextMenuBuilder: (context, selectableRegionState) {
-        final baseItems =
-            selectableRegionState.contextMenuButtonItems.where((item) {
-          return item.type == ContextMenuButtonType.copy ||
-              item.type == ContextMenuButtonType.selectAll;
-        }).toList();
-
         final cleanText = _scrollSelectedText.trim();
         final items = <ContextMenuButtonItem>[
           if (cleanText.isNotEmpty) ...[
@@ -994,7 +1186,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
               },
             ),
           ],
-          ...baseItems,
+          ...selectableRegionState.contextMenuButtonItems,
         ];
         return AdaptiveTextSelectionToolbar.buttonItems(
           anchors: selectableRegionState.contextMenuAnchors,
@@ -1022,6 +1214,17 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
           final p = _paragraphs[index - 1];
           final hasTranslation = p.isTranslated;
+          final translatedStyle = TextStyle(
+            fontSize: _appearance.fontSize,
+            height: _appearance.lineHeight,
+            color: palette.text,
+          );
+          final originalStyle = TextStyle(
+            fontSize: (_appearance.fontSize - 3.5).clamp(11.0, 24.0),
+            height: 1.38,
+            color: palette.secondaryText,
+            fontStyle: FontStyle.italic,
+          );
 
           return Padding(
             padding: const EdgeInsets.only(bottom: 14),
@@ -1029,23 +1232,17 @@ class _ReaderScreenState extends State<ReaderScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (_appearance.isOriginalOnly)
-                  Text(
-                    p.sourceText,
-                    style: TextStyle(
-                      fontSize: _appearance.fontSize,
-                      height: _appearance.lineHeight,
-                      color: palette.text,
-                    ),
+                  Text(p.sourceText, style: translatedStyle)
+                else if (hasTranslation && _appearance.showOriginal)
+                  _buildScrollInteractiveText(
+                    palette: palette,
+                    paragraph: p,
+                    text: p.translatedText!,
+                    baseStyle: translatedStyle,
+                    isOriginalText: false,
                   )
                 else if (hasTranslation)
-                  Text(
-                    p.translatedText!,
-                    style: TextStyle(
-                      fontSize: _appearance.fontSize,
-                      height: _appearance.lineHeight,
-                      color: palette.text,
-                    ),
-                  )
+                  Text(p.translatedText!, style: translatedStyle)
                 else
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1075,14 +1272,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   ),
                 if (_appearance.showOriginal && hasTranslation) ...[
                   const SizedBox(height: 5),
-                  Text(
-                    p.sourceText,
-                    style: TextStyle(
-                      fontSize: (_appearance.fontSize - 3.5).clamp(11.0, 24.0),
-                      height: 1.38,
-                      color: palette.secondaryText,
-                      fontStyle: FontStyle.italic,
-                    ),
+                  _buildScrollInteractiveText(
+                    palette: palette,
+                    paragraph: p,
+                    text: p.sourceText,
+                    baseStyle: originalStyle,
+                    isOriginalText: true,
                   ),
                 ],
               ],
