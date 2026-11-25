@@ -71,13 +71,11 @@ class _BookPageViewState extends State<BookPageView>
   Offset? _tapDownPos;
   String _selectedText = '';
 
-  // Индексы ТОЛЬКО ОДНОГО нажатого слова и ОДНОГО парного слова в соседнем абзаце
   int? _highlightedParagraphOrder;
   int? _highlightedSourceTokenIndex;
   int? _highlightedTranslatedTokenIndex;
   bool _wordTapHandled = false;
 
-  // Базовые соответствия местоимений/предлогов на случай офлайн-работы
   static const Map<String, List<String>> _pronounHints = {
     'его': ['his', 'him', 'its', 'it'],
     'её': ['her', 'hers', 'its', 'it'],
@@ -321,7 +319,6 @@ class _BookPageViewState extends State<BookPageView>
         .replaceAll(RegExp(r"[^\p{L}\p{N}'’-]", unicode: true), '');
   }
 
-  /// Возвращает индекс ОДНОГО наиболее подходящего токена в целевом тексте
   int? _findBestMatchingTokenIndex({
     required String targetParagraph,
     required String tappedNormWord,
@@ -353,7 +350,6 @@ class _BookPageViewState extends State<BookPageView>
 
       for (int cIdx = 0; cIdx < candidates.length; cIdx++) {
         final cand = candidates[cIdx];
-        // Небольшой бонус более ранним кандидатам
         final candBonus = cIdx == 0 ? 0.3 : 0.0;
 
         if (normW == cand) {
@@ -398,7 +394,6 @@ class _BookPageViewState extends State<BookPageView>
 
     _wordTapHandled = true;
 
-    // Повторный тап по тому же самому токену снимает подсветку
     if (_highlightedParagraphOrder == paragraph.orderIndex &&
         ((tappedInOriginal && _highlightedSourceTokenIndex == tokenIndex) ||
             (!tappedInOriginal &&
@@ -411,7 +406,6 @@ class _BookPageViewState extends State<BookPageView>
       return;
     }
 
-    // Мгновенно подсвечиваем ТОЛЬКО нажатый токен
     setState(() {
       _highlightedParagraphOrder = paragraph.orderIndex;
       if (tappedInOriginal) {
@@ -909,18 +903,19 @@ class _BookPageViewState extends State<BookPageView>
 
             final localDx = event.localPosition.dx;
             final w = size.width;
-            if (localDx < w * 0.25) {
-              _triggerPrevPage();
-            } else if (localDx > w * 0.75) {
-              _triggerNextPage();
-            } else {
-              Future.delayed(const Duration(milliseconds: 30), () {
-                if (!mounted) return;
-                if (!_wordTapHandled) {
-                  widget.onCenterTap?.call();
-                }
-              });
-            }
+
+            // Ждём 30 мс: если тап попал по слову в билингве, _wordTapHandled станет true
+            // и сработает подсветка слова, а не перелистывание / скрытие панели
+            Future.delayed(const Duration(milliseconds: 30), () {
+              if (!mounted || _wordTapHandled) return;
+              if (localDx < w * 0.20) {
+                _triggerPrevPage();
+              } else if (localDx > w * 0.80) {
+                _triggerNextPage();
+              } else {
+                widget.onCenterTap?.call();
+              }
+            });
           },
           child: GestureDetector(
             behavior: HitTestBehavior.translucent,
