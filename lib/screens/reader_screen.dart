@@ -3,9 +3,11 @@ import 'dart:math' as math;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import '../db/book_database.dart';
 import '../models/book_models.dart';
 import '../models/reader_theme_settings.dart';
+import '../services/settings_service.dart';
 import '../services/translation_queue.dart';
 import '../services/translator_service.dart';
 import '../widgets/book_page_view.dart';
@@ -14,14 +16,18 @@ class ReaderScreen extends StatefulWidget {
   final Book book;
   final TranslationQueueController queueController;
   final TranslatorService translatorService;
-  final String targetLanguage;
+  final SettingsService settingsService;
+  final TranslatorSettings initialSettings;
+  final ValueChanged<TranslatorSettings> onSettingsChanged;
 
   const ReaderScreen({
     super.key,
     required this.book,
     required this.queueController,
     required this.translatorService,
-    required this.targetLanguage,
+    required this.settingsService,
+    required this.initialSettings,
+    required this.onSettingsChanged,
   });
 
   @override
@@ -33,9 +39,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
   List<ParagraphItem> _paragraphs = [];
   int _currentChapterIndex = 0;
   int _currentPageInChapter = 0;
+  double _currentScrollOffset = 0.0;
   bool _loadingChapter = true;
   bool _showControls = true;
   String _scrollSelectedText = '';
+
+  late TranslatorSettings _settings;
+  late final ScrollController _scrollController;
+  late final TextEditingController _chaptersAheadController;
 
   final Map<String, String> _wordLookupCache = {};
 
@@ -47,7 +58,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   TranslateMode _selectedMode = TranslateMode.nextChapters;
   int _chaptersAhead = 3;
+  int _specificChapterIndex = 0;
+
   StreamSubscription<TranslationProgress>? _progressSub;
+  Timer? _saveProgressDebounce;
 
   static const Map<String, List<String>> _pronounHints = {
     'его': ['his', 'him', 'its', 'it'],
@@ -89,6 +103,17 @@ class _ReaderScreenState extends State<ReaderScreen> {
   @override
   void initState() {
     super.initState();
+    _settings = widget.initialSettings;
+    _currentChapterIndex = widget.book.lastChapterIndex;
+    _currentPageInChapter = widget.book.lastPageIndex;
+    _currentScrollOffset = widget.book.lastScrollOffset;
+    _specificChapterIndex = widget.book.lastChapterIndex;
+
+    _chaptersAheadController = TextEditingController(text: '$_chaptersAhead');
+    _scrollController = ScrollController(
+      initialScrollOffset: _currentScrollOffset,
+    )..addListener(_onScrollChanged);
+
     _initData();
     _progressSub = widget.queueController.progressStream.listen((p) {
       if (p.activeBookId == widget.book.id) {
@@ -98,13 +123,46 @@ class _ReaderScreenState extends State<ReaderScreen> {
     });
   }
 
+  void _onScrollChanged() {
+    if (!_scrollController.hasClients) return;
+    _currentScrollOffset = _scrollController.offset;
+    _scheduleSaveReadingProgress();
+  }
+
+  void _scheduleSaveReadingProgress() {
+    _saveProgressDebounce?.cancel();
+    _saveProgressDebounce = Timer(const Duration(milliseconds: 450), () {
+      _persistReadingProgressNow();
+    });
+  }
+
+  Future<void> _persistReadingProgressNow() async {
+    await BookDatabase.instance.updateBookReadingProgress(
+      bookId: widget.book.id,
+      chapterIndex: _currentChapterIndex,
+      pageIndex: _currentPageInChapter,
+      scrollOffset: _currentScrollOffset,
+    );
+  }
+
   Future<void> _initData() async {
     final savedAppearance = await ReaderAppearance.load();
     if (mounted) {
       setState(() => _appearance = savedAppearance);
     }
     await _refreshChaptersList();
-    await _loadChapter(0);
+
+    final freshBook = await BookDatabase.instance.getBookById(widget.book.id);
+    final startChapter = freshBook?.lastChapterIndex ?? widget.book.lastChapterIndex;
+    final startPage = freshBook?.lastPageIndex ?? widget.book.lastPageIndex;
+    final startScroll = freshBook?.lastScrollOffset ?? widget.book.lastScrollOffset;
+
+    await _loadChapter(
+      startChapter,
+      startPage: startPage,
+      startScrollOffset: startScroll,
+      saveProgress: false,
+    );
   }
 
   void _updateAppearance(ReaderAppearance next) {
@@ -112,18 +170,43 @@ class _ReaderScreenState extends State<ReaderScreen> {
     next.save();
   }
 
+  Future<void> _toggleQuickEngine(bool useOffline) async {
+    final nextMode = useOffline
+        ? TranslationEngineMode.offlineLocal
+        : TranslationEngineMode.groqCloud;
+    final updated = _settings.copyWith(engineMode: nextMode);
+    await widget.settingsService.saveSettings(updated);
+    widget.translatorService.settings = updated;
+    widget.queueController.updateSettings(updated);
+    widget.onSettingsChanged(updated);
+    if (mounted) {
+      setState(() => _settings = updated);
+    }
+  }
+
   Future<void> _refreshChaptersList() async {
     final chs = await BookDatabase.instance.getChapters(widget.book.id);
     if (!mounted) return;
-    setState(() => _chapters = chs);
+    setState(() {
+      _chapters = chs;
+      if (_specificChapterIndex >= _chapters.length) {
+        _specificChapterIndex = (_chapters.length - 1).clamp(0, _chapters.length);
+      }
+    });
   }
 
-  Future<void> _loadChapter(int index, {int startPage = 0}) async {
+  Future<void> _loadChapter(
+    int index, {
+    int startPage = 0,
+    double startScrollOffset = 0.0,
+    bool saveProgress = true,
+  }) async {
     if (_chapters.isEmpty) return;
     final safeIdx = index.clamp(0, _chapters.length - 1);
     setState(() {
       _currentChapterIndex = safeIdx;
       _currentPageInChapter = startPage;
+      _currentScrollOffset = startScrollOffset;
       _loadingChapter = true;
       _scrollHighlightOrder = null;
       _scrollHighlightSourceToken = null;
@@ -138,6 +221,19 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _paragraphs = items;
       _loadingChapter = false;
     });
+
+    if (_appearance.pageMode == ReaderPageMode.scroll) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollController.hasClients) {
+          final maxScroll = _scrollController.position.maxScrollExtent;
+          _scrollController.jumpTo(startScrollOffset.clamp(0.0, maxScroll));
+        }
+      });
+    }
+
+    if (saveProgress) {
+      await _persistReadingProgressNow();
+    }
   }
 
   Future<void> _refreshCurrentChapter({bool silent = false}) async {
@@ -155,13 +251,23 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   void _startQueue({TranslateMode? overrideMode, int? overrideAhead}) {
+    final parsedAhead = int.tryParse(_chaptersAheadController.text.trim());
+    final effectiveAhead =
+        (overrideAhead ?? parsedAhead ?? _chaptersAhead).clamp(1, 500);
+
+    setState(() {
+      _chaptersAhead = effectiveAhead;
+      _chaptersAheadController.text = '$effectiveAhead';
+    });
+
     widget.queueController.startTranslation(
       bookId: widget.book.id,
       bookTitle: widget.book.title,
       currentReadingChapter: _currentChapterIndex,
       mode: overrideMode ?? _selectedMode,
-      chaptersAhead: overrideAhead ?? _chaptersAhead,
-      targetLanguage: widget.targetLanguage,
+      chaptersAhead: effectiveAhead,
+      specificChapterIndex: _specificChapterIndex,
+      targetLanguage: _settings.targetLanguage,
     );
   }
 
@@ -172,7 +278,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     required double relativePosition,
   }) async {
     final cacheKey =
-        '${tappedWord.toLowerCase()}_${sourceParagraph.hashCode}_${(relativePosition * 10).round()}';
+        '${_settings.engineMode.index}_${tappedWord.toLowerCase()}_${sourceParagraph.hashCode}_${(relativePosition * 10).round()}';
     if (_wordLookupCache.containsKey(cacheKey)) {
       return _wordLookupCache[cacheKey]!;
     }
@@ -202,7 +308,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     try {
       final translated = await widget.translatorService.translateSelection(
         selectedText: clean,
-        targetLanguage: widget.targetLanguage,
+        targetLanguage: _settings.targetLanguage,
       );
 
       await BookDatabase.instance.addDictionaryEntry(
@@ -284,7 +390,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   FutureBuilder<String>(
                     future: widget.translatorService.translateSelection(
                       selectedText: selectedText,
-                      targetLanguage: widget.targetLanguage,
+                      targetLanguage: _settings.targetLanguage,
                     ),
                     builder: (context, snapshot) {
                       if (snapshot.connectionState == ConnectionState.waiting) {
@@ -397,6 +503,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
         return StatefulBuilder(
           builder: (ctx, setModalState) {
             final palette = ReaderPalette.of(_appearance.colorTheme);
+            final isOffline =
+                _settings.engineMode == TranslationEngineMode.offlineLocal;
 
             void apply(ReaderAppearance next) {
               _updateAppearance(next);
@@ -427,7 +535,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   ),
                   const SizedBox(height: 14),
                   Text(
-                    'Оформление и режим чтения',
+                    'Оформление и движок перевода',
                     style: TextStyle(
                       fontSize: 17,
                       fontWeight: FontWeight.bold,
@@ -435,6 +543,42 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     ),
                   ),
                   const SizedBox(height: 14),
+
+                  Text(
+                    'Движок перевода',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: palette.secondaryText,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      _modeChip(
+                        palette: palette,
+                        icon: Icons.bolt,
+                        label: 'ИИ-модели',
+                        selected: !isOffline,
+                        onTap: () async {
+                          await _toggleQuickEngine(false);
+                          setModalState(() {});
+                        },
+                      ),
+                      const SizedBox(width: 8),
+                      _modeChip(
+                        palette: palette,
+                        icon: Icons.offline_pin_outlined,
+                        label: 'Офлайн-словарь',
+                        selected: isOffline,
+                        onTap: () async {
+                          await _toggleQuickEngine(true);
+                          setModalState(() {});
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
 
                   Text(
                     'Отображение текста',
@@ -655,37 +799,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         icon: Icon(Icons.text_increase, color: palette.text),
                       ),
                     ],
-                  ),
-
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        'Межстрочный интервал',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: palette.secondaryText,
-                        ),
-                      ),
-                      Text(
-                        _appearance.lineHeight.toStringAsFixed(2),
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
-                          color: palette.text,
-                        ),
-                      ),
-                    ],
-                  ),
-                  Slider(
-                    min: 1.2,
-                    max: 2.0,
-                    divisions: 8,
-                    activeColor: palette.accent,
-                    value: _appearance.lineHeight,
-                    onChanged: (v) =>
-                        apply(_appearance.copyWith(lineHeight: v)),
                   ),
                 ],
               ),
@@ -943,7 +1056,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   @override
   void dispose() {
+    _saveProgressDebounce?.cancel();
+    _persistReadingProgressNow();
     _progressSub?.cancel();
+    _scrollController.dispose();
+    _chaptersAheadController.dispose();
     super.dispose();
   }
 
@@ -953,6 +1070,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final currentChapterTitle = _chapters.isNotEmpty
         ? _chapters[_currentChapterIndex].title
         : 'Глава 1';
+    final isOfflineEngine =
+        _settings.engineMode == TranslationEngineMode.offlineLocal;
 
     return Theme(
       data: ThemeData(
@@ -976,6 +1095,28 @@ class _ReaderScreenState extends State<ReaderScreen> {
             style: TextStyle(color: palette.text, fontSize: 17),
           ),
           actions: [
+            // Быстрый переключатель движка: ИИ / Офлайн прямо в шапке читалки
+            Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: ActionChip(
+                avatar: Icon(
+                  isOfflineEngine ? Icons.offline_pin : Icons.bolt,
+                  size: 16,
+                  color: palette.accent,
+                ),
+                label: Text(
+                  isOfflineEngine ? 'Офлайн' : 'ИИ',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: palette.text,
+                  ),
+                ),
+                backgroundColor: palette.background,
+                side: BorderSide(color: palette.accent.withOpacity(0.45)),
+                onPressed: () => _toggleQuickEngine(!isOfflineEngine),
+              ),
+            ),
             IconButton(
               icon: Icon(
                 _showControls ? Icons.fullscreen : Icons.fullscreen_exit,
@@ -986,7 +1127,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
             ),
             IconButton(
               icon: Icon(Icons.text_fields, color: palette.text),
-              tooltip: 'Шрифт и тема чтения',
+              tooltip: 'Шрифт, тема и движок',
               onPressed: _openAppearanceSheet,
             ),
           ],
@@ -1022,52 +1163,106 @@ class _ReaderScreenState extends State<ReaderScreen> {
                                 dropdownColor: palette.surface,
                                 style: TextStyle(
                                   color: palette.text,
-                                  fontSize: 14,
+                                  fontSize: 13,
                                 ),
                                 value: _selectedMode,
                                 items: const [
                                   DropdownMenuItem(
                                     value: TranslateMode.nextChapters,
-                                    child: Text('Перевести +N глав вперёд'),
+                                    child: Text('+N глав вперёд'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value: TranslateMode.specificChapter,
+                                    child: Text('Конкретная глава'),
                                   ),
                                   DropdownMenuItem(
                                     value: TranslateMode.fullBook,
-                                    child: Text('Перевести всю книгу'),
+                                    child: Text('Вся книга'),
                                   ),
                                 ],
                                 onChanged: p.isRunning
                                     ? null
                                     : (val) {
                                         if (val != null) {
-                                          setState(() => _selectedMode = val);
+                                          setState(() {
+                                            _selectedMode = val;
+                                            if (val ==
+                                                TranslateMode.specificChapter) {
+                                              _specificChapterIndex =
+                                                  _currentChapterIndex;
+                                            }
+                                          });
                                         }
                                       },
                               ),
                             ),
                             if (_selectedMode == TranslateMode.nextChapters) ...[
                               const SizedBox(width: 8),
-                              DropdownButton<int>(
-                                dropdownColor: palette.surface,
-                                style: TextStyle(
-                                  color: palette.text,
-                                  fontSize: 14,
+                              SizedBox(
+                                width: 64,
+                                height: 38,
+                                child: TextField(
+                                  controller: _chaptersAheadController,
+                                  enabled: !p.isRunning,
+                                  keyboardType: TextInputType.number,
+                                  textAlign: TextAlign.center,
+                                  inputFormatters: [
+                                    FilteringTextInputFormatter.digitsOnly,
+                                  ],
+                                  style: TextStyle(
+                                    color: palette.text,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                  decoration: InputDecoration(
+                                    contentPadding: const EdgeInsets.symmetric(
+                                      horizontal: 6,
+                                      vertical: 4,
+                                    ),
+                                    hintText: '3',
+                                    border: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                  ),
                                 ),
-                                value: _chaptersAhead,
-                                items: const [1, 2, 3, 5, 10]
-                                    .map(
-                                      (n) => DropdownMenuItem(
-                                        value: n,
-                                        child: Text('+$n'),
-                                      ),
-                                    )
-                                    .toList(),
-                                onChanged: p.isRunning
-                                    ? null
-                                    : (val) {
-                                        if (val != null) {
-                                          setState(() => _chaptersAhead = val);
-                                        }
-                                      },
+                              ),
+                            ] else if (_selectedMode ==
+                                    TranslateMode.specificChapter &&
+                                _chapters.isNotEmpty) ...[
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: DropdownButton<int>(
+                                  isExpanded: true,
+                                  dropdownColor: palette.surface,
+                                  style: TextStyle(
+                                    color: palette.text,
+                                    fontSize: 13,
+                                  ),
+                                  value: _specificChapterIndex.clamp(
+                                    0,
+                                    _chapters.length - 1,
+                                  ),
+                                  items: _chapters
+                                      .map(
+                                        (ch) => DropdownMenuItem(
+                                          value: ch.index,
+                                          child: Text(
+                                            'Гл. ${ch.index + 1}: ${ch.title}',
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      )
+                                      .toList(),
+                                  onChanged: p.isRunning
+                                      ? null
+                                      : (val) {
+                                          if (val != null) {
+                                            setState(
+                                              () => _specificChapterIndex = val,
+                                            );
+                                          }
+                                        },
+                                ),
                               ),
                             ],
                             const SizedBox(width: 8),
@@ -1191,6 +1386,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                           initialPage: _currentPageInChapter,
                           onPageChanged: (page) {
                             _currentPageInChapter = page;
+                            _scheduleSaveReadingProgress();
                           },
                           onCenterTap: () {
                             setState(() => _showControls = !_showControls);
@@ -1206,8 +1402,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                             }
                           },
                           onTranslateHere: () => _startQueue(
-                            overrideMode: TranslateMode.nextChapters,
-                            overrideAhead: 1,
+                            overrideMode: TranslateMode.specificChapter,
                           ),
                           onTranslateSelection: _showSelectionTranslationSheet,
                           onSaveSelectionToDictionary:
@@ -1265,6 +1460,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         );
       },
       child: ListView.builder(
+        controller: _scrollController,
         padding: const EdgeInsets.fromLTRB(20, 18, 20, 48),
         itemCount: _paragraphs.length + 1,
         itemBuilder: (context, index) {
@@ -1331,8 +1527,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                       const SizedBox(width: 8),
                       TextButton(
                         onPressed: () => _startQueue(
-                          overrideMode: TranslateMode.nextChapters,
-                          overrideAhead: 1,
+                          overrideMode: TranslateMode.specificChapter,
                         ),
                         child: Text(
                           'Перевести',
