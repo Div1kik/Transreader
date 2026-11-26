@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 enum TranslationEngineMode {
@@ -6,12 +7,82 @@ enum TranslationEngineMode {
   customApi,
 }
 
+class ApiProviderProfile {
+  final String id;
+  final String name;
+  final String endpointUrl;
+  final String apiKey;
+  final List<String> models;
+  final bool enabled;
+
+  const ApiProviderProfile({
+    required this.id,
+    required this.name,
+    required this.endpointUrl,
+    required this.apiKey,
+    required this.models,
+    this.enabled = true,
+  });
+
+  ApiProviderProfile copyWith({
+    String? id,
+    String? name,
+    String? endpointUrl,
+    String? apiKey,
+    List<String>? models,
+    bool? enabled,
+  }) {
+    return ApiProviderProfile(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      endpointUrl: endpointUrl ?? this.endpointUrl,
+      apiKey: apiKey ?? this.apiKey,
+      models: models ?? this.models,
+      enabled: enabled ?? this.enabled,
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'name': name,
+      'endpointUrl': endpointUrl,
+      'apiKey': apiKey,
+      'models': models,
+      'enabled': enabled,
+    };
+  }
+
+  factory ApiProviderProfile.fromMap(Map<String, dynamic> map) {
+    final rawModels = map['models'];
+    final parsedModels = rawModels is List
+        ? rawModels
+            .map((e) => e.toString().trim())
+            .where((e) => e.isNotEmpty)
+            .toList()
+        : <String>[];
+
+    return ApiProviderProfile(
+      id: (map['id'] as String?) ??
+          DateTime.now().microsecondsSinceEpoch.toString(),
+      name: (map['name'] as String?) ?? 'API Провайдер',
+      endpointUrl: (map['endpointUrl'] as String?) ??
+          'https://api.groq.com/openai/v1/chat/completions',
+      apiKey: (map['apiKey'] as String?) ?? '',
+      models: parsedModels,
+      enabled: (map['enabled'] as bool?) ?? true,
+    );
+  }
+}
+
 class TranslatorSettings {
   final TranslationEngineMode engineMode;
   final String endpointUrl;
   final String apiKey;
   final String model;
   final List<String> fallbackModels;
+  final List<ApiProviderProfile> providers;
+  final bool fallbackToOfflineOnError;
   final String targetLanguage;
 
   const TranslatorSettings({
@@ -24,6 +95,8 @@ class TranslatorSettings {
       'openai/gpt-oss-20b',
       'meta-llama/llama-4-scout-17b-16e-instruct',
     ],
+    this.providers = const [],
+    this.fallbackToOfflineOnError = false,
     this.targetLanguage = 'Russian',
   });
 
@@ -40,12 +113,53 @@ class TranslatorSettings {
     return list;
   }
 
+  /// Возвращает упорядоченный список всех активных провайдеров с заполненным ключом
+  List<ApiProviderProfile> get effectiveProviders {
+    final result = <ApiProviderProfile>[];
+
+    for (final p in providers) {
+      if (p.enabled &&
+          p.apiKey.trim().isNotEmpty &&
+          p.endpointUrl.trim().isNotEmpty &&
+          p.models.isNotEmpty) {
+        result.add(p);
+      }
+    }
+
+    // Если список профилей пуст, собираем профиль из основных полей (обратная совместимость)
+    if (result.isEmpty && apiKey.trim().isNotEmpty) {
+      final models = activeModelPool;
+      if (models.isNotEmpty) {
+        result.add(
+          ApiProviderProfile(
+            id: 'primary_default',
+            name: endpointUrl.contains('groq.com')
+                ? 'Groq'
+                : endpointUrl.contains('openrouter.ai')
+                    ? 'OpenRouter'
+                    : 'Основной API',
+            endpointUrl: endpointUrl.trim(),
+            apiKey: apiKey.trim(),
+            models: models,
+            enabled: true,
+          ),
+        );
+      }
+    }
+
+    return result;
+  }
+
+  bool get hasAnyOnlineKey => effectiveProviders.isNotEmpty;
+
   TranslatorSettings copyWith({
     TranslationEngineMode? engineMode,
     String? endpointUrl,
     String? apiKey,
     String? model,
     List<String>? fallbackModels,
+    List<ApiProviderProfile>? providers,
+    bool? fallbackToOfflineOnError,
     String? targetLanguage,
   }) {
     return TranslatorSettings(
@@ -54,6 +168,9 @@ class TranslatorSettings {
       apiKey: apiKey ?? this.apiKey,
       model: model ?? this.model,
       fallbackModels: fallbackModels ?? this.fallbackModels,
+      providers: providers ?? this.providers,
+      fallbackToOfflineOnError:
+          fallbackToOfflineOnError ?? this.fallbackToOfflineOnError,
       targetLanguage: targetLanguage ?? this.targetLanguage,
     );
   }
@@ -65,6 +182,8 @@ class SettingsService {
   static const _kApiKey = 'translator_api_key';
   static const _kModel = 'translator_model';
   static const _kFallbacks = 'translator_fallback_models';
+  static const _kProvidersJson = 'translator_providers_json';
+  static const _kFallbackOffline = 'translator_fallback_offline_on_err';
   static const _kLang = 'translator_target_lang';
 
   Future<TranslatorSettings> loadSettings() async {
@@ -84,18 +203,61 @@ class SettingsService {
             ? 'llama-3.3-70b-versatile'
             : savedModel;
 
+    final savedApiKey = prefs.getString(_kApiKey) ?? '';
+    final savedFallbacks = prefs.getStringList(_kFallbacks) ??
+        const [
+          'openai/gpt-oss-120b',
+          'openai/gpt-oss-20b',
+          'meta-llama/llama-4-scout-17b-16e-instruct',
+        ];
+
+    List<ApiProviderProfile> loadedProviders = [];
+    final rawProviders = prefs.getString(_kProvidersJson);
+    if (rawProviders != null && rawProviders.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawProviders);
+        if (decoded is List) {
+          loadedProviders = decoded
+              .whereType()
+              .map(
+                (m) => ApiProviderProfile.fromMap(
+                  Map<String, dynamic>.from(m),
+                ),
+              )
+              .toList();
+        }
+      } catch (_) {}
+    }
+
+    // Автомиграция: если профилей ещё не было, но ключ Groq уже сохранён — создаём первый профиль
+    if (loadedProviders.isEmpty && savedApiKey.trim().isNotEmpty) {
+      final initialModels = <String>[
+        effectiveModel,
+        ...savedFallbacks.where((m) => m != effectiveModel),
+      ];
+      loadedProviders = [
+        ApiProviderProfile(
+          id: 'groq_main',
+          name: effectiveEndpoint.contains('groq.com')
+              ? 'Groq (Основной)'
+              : 'Основной провайдер',
+          endpointUrl: effectiveEndpoint,
+          apiKey: savedApiKey.trim(),
+          models: initialModels,
+          enabled: true,
+        ),
+      ];
+    }
+
     return TranslatorSettings(
       engineMode: TranslationEngineMode
           .values[modeIdx.clamp(0, TranslationEngineMode.values.length - 1)],
       endpointUrl: effectiveEndpoint,
-      apiKey: prefs.getString(_kApiKey) ?? '',
+      apiKey: savedApiKey,
       model: effectiveModel,
-      fallbackModels: prefs.getStringList(_kFallbacks) ??
-          const [
-            'openai/gpt-oss-120b',
-            'openai/gpt-oss-20b',
-            'meta-llama/llama-4-scout-17b-16e-instruct',
-          ],
+      fallbackModels: savedFallbacks,
+      providers: loadedProviders,
+      fallbackToOfflineOnError: prefs.getBool(_kFallbackOffline) ?? false,
       targetLanguage: prefs.getString(_kLang) ?? 'Russian',
     );
   }
@@ -107,6 +269,14 @@ class SettingsService {
     await prefs.setString(_kApiKey, settings.apiKey.trim());
     await prefs.setString(_kModel, settings.model.trim());
     await prefs.setStringList(_kFallbacks, settings.fallbackModels);
+    await prefs.setString(
+      _kProvidersJson,
+      jsonEncode(settings.providers.map((p) => p.toMap()).toList()),
+    );
+    await prefs.setBool(
+      _kFallbackOffline,
+      settings.fallbackToOfflineOnError,
+    );
     await prefs.setString(_kLang, settings.targetLanguage.trim());
   }
 }
