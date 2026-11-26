@@ -15,7 +15,7 @@ class BookDatabase {
     return join(dbPath, 'transreader_books.db');
   }
 
-  Future<void> _ensureDictionaryTable(Database db) async {
+  Future<void> _ensureSchemaUpToDate(Database db) async {
     await db.execute('''
       CREATE TABLE IF NOT EXISTS dictionary (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,6 +25,25 @@ class BookDatabase {
         createdAt INTEGER NOT NULL DEFAULT 0
       )
     ''');
+
+    final bookColumns = await db.rawQuery('PRAGMA table_info(books)');
+    final colNames = bookColumns.map((c) => c['name'].toString()).toSet();
+
+    if (!colNames.contains('lastChapterIndex')) {
+      await db.execute(
+        'ALTER TABLE books ADD COLUMN lastChapterIndex INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+    if (!colNames.contains('lastPageIndex')) {
+      await db.execute(
+        'ALTER TABLE books ADD COLUMN lastPageIndex INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+    if (!colNames.contains('lastScrollOffset')) {
+      await db.execute(
+        'ALTER TABLE books ADD COLUMN lastScrollOffset REAL NOT NULL DEFAULT 0.0',
+      );
+    }
   }
 
   Future<Database> get database async {
@@ -32,14 +51,17 @@ class BookDatabase {
     final path = await getDatabaseFilePath();
     _db = await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE books (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
             format TEXT NOT NULL,
-            totalChapters INTEGER NOT NULL
+            totalChapters INTEGER NOT NULL,
+            lastChapterIndex INTEGER NOT NULL DEFAULT 0,
+            lastPageIndex INTEGER NOT NULL DEFAULT 0,
+            lastScrollOffset REAL NOT NULL DEFAULT 0.0
           )
         ''');
 
@@ -68,15 +90,13 @@ class BookDatabase {
           'CREATE INDEX idx_paragraphs_book_ch ON paragraphs (bookId, chapterIndex, orderIndex)',
         );
 
-        await _ensureDictionaryTable(db);
+        await _ensureSchemaUpToDate(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
-        if (oldVersion < 2) {
-          await _ensureDictionaryTable(db);
-        }
+        await _ensureSchemaUpToDate(db);
       },
       onOpen: (db) async {
-        await _ensureDictionaryTable(db);
+        await _ensureSchemaUpToDate(db);
       },
     );
     return _db!;
@@ -167,6 +187,37 @@ class BookDatabase {
     final db = await database;
     final rows = await db.query('books', orderBy: 'rowid DESC');
     return rows.map((e) => Book.fromMap(e)).toList();
+  }
+
+  Future<Book?> getBookById(String bookId) async {
+    final db = await database;
+    final rows = await db.query(
+      'books',
+      where: 'id = ?',
+      whereArgs: [bookId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return Book.fromMap(rows.first);
+  }
+
+  Future<void> updateBookReadingProgress({
+    required String bookId,
+    required int chapterIndex,
+    required int pageIndex,
+    required double scrollOffset,
+  }) async {
+    final db = await database;
+    await db.update(
+      'books',
+      {
+        'lastChapterIndex': chapterIndex,
+        'lastPageIndex': pageIndex,
+        'lastScrollOffset': scrollOffset,
+      },
+      where: 'id = ?',
+      whereArgs: [bookId],
+    );
   }
 
   Future<List<Chapter>> getChapters(String bookId) async {
