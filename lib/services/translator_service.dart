@@ -23,25 +23,29 @@ class ModelRateLimitException implements Exception {
 
 class TranslatorService {
   TranslatorSettings settings;
-  final Map<String, DateTime> _modelCooldownUntil = {};
+  final Map<String, DateTime> _routeCooldownUntil = {};
 
   TranslatorService({required this.settings});
 
-  bool isModelCoolingDown(String model) {
-    final until = _modelCooldownUntil[model];
+  String _routeKey(ApiProviderProfile provider, String model) =>
+      '${provider.id}::$model';
+
+  bool isRouteCoolingDown(ApiProviderProfile provider, String model) {
+    final key = _routeKey(provider, model);
+    final until = _routeCooldownUntil[key];
     if (until == null) return false;
     if (DateTime.now().isAfter(until)) {
-      _modelCooldownUntil.remove(model);
+      _routeCooldownUntil.remove(key);
       return false;
     }
     return true;
   }
 
   int getShortestCooldownSeconds() {
-    if (_modelCooldownUntil.isEmpty) return 0;
+    if (_routeCooldownUntil.isEmpty) return 0;
     final now = DateTime.now();
     int minSec = 999999;
-    for (final until in _modelCooldownUntil.values) {
+    for (final until in _routeCooldownUntil.values) {
       final diff = until.difference(now).inSeconds;
       if (diff > 0 && diff < minSec) {
         minSec = diff;
@@ -54,7 +58,6 @@ class TranslatorService {
     return RegExp(r'[а-яА-ЯёЁ]').hasMatch(text);
   }
 
-  /// Быстрый перевод выделенного слова или фразы (в поп-апе при выделении)
   Future<String> translateSelection({
     required String selectedText,
     required String targetLanguage,
@@ -68,7 +71,7 @@ class TranslatorService {
     final effectiveTarget = _isCyrillic(clean) ? 'English' : targetLanguage;
 
     if (settings.engineMode == TranslationEngineMode.offlineLocal ||
-        settings.apiKey.trim().isEmpty) {
+        !settings.hasAnyOnlineKey) {
       return OfflineTranslatorService.instance.translateText(
         clean,
         source: sourceLang,
@@ -92,7 +95,6 @@ class TranslatorService {
     }
   }
 
-  /// Контекстный поиск точного парного слова в соседнем абзаце (работает в обе стороны: EN->RU и RU->EN)
   Future<String> findCounterpartWordInContext({
     required String tappedWord,
     required String sourceParagraph,
@@ -104,63 +106,61 @@ class TranslatorService {
 
     final isRussianTap = _isCyrillic(cleanWord);
 
-    // 1. Если доступен онлайн-ключ (Groq / Custom API), просим модель выбрать ОДНО точное слово прямо из targetParagraph
     if (settings.engineMode != TranslationEngineMode.offlineLocal &&
-        settings.apiKey.trim().isNotEmpty) {
-      try {
-        final pool = settings.activeModelPool
-            .where((m) => !isModelCoolingDown(m))
-            .toList();
-        if (pool.isNotEmpty) {
-          final model = pool.first;
-          final pct = (relativePosition * 100).round();
-          final response = await http
-              .post(
-                Uri.parse(settings.endpointUrl),
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Accept': 'application/json',
-                  'Authorization': 'Bearer ${settings.apiKey}',
-                },
-                body: jsonEncode({
-                  'model': model,
-                  'temperature': 0.0,
-                  'max_tokens': 24,
-                  'messages': [
-                    {
-                      'role': 'system',
-                      'content':
-                          'You are a bilingual word-alignment engine. Given a tapped word in a source paragraph (at roughly $pct% through the text) and its translated counterpart paragraph, output ONLY the single exact matching word from the target paragraph. No punctuation, no explanations, just that one word.',
-                    },
-                    {
-                      'role': 'user',
-                      'content':
-                          'Tapped word: "$cleanWord"\nSource paragraph: "$sourceParagraph"\nTarget paragraph: "$targetParagraph"\nExact matching word from Target paragraph:',
-                    },
-                  ],
-                }),
-              )
-              .timeout(const Duration(seconds: 8));
+        settings.hasAnyOnlineKey) {
+      final providers = settings.effectiveProviders;
+      for (final provider in providers) {
+        for (final model in provider.models) {
+          if (isRouteCoolingDown(provider, model)) continue;
+          try {
+            final pct = (relativePosition * 100).round();
+            final response = await http
+                .post(
+                  Uri.parse(provider.endpointUrl),
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'Authorization': 'Bearer ${provider.apiKey}',
+                  },
+                  body: jsonEncode({
+                    'model': model,
+                    'temperature': 0.0,
+                    'max_tokens': 24,
+                    'messages': [
+                      {
+                        'role': 'system',
+                        'content':
+                            'You are a bilingual word-alignment engine. Given a tapped word in a source paragraph (at roughly $pct% through the text) and its translated counterpart paragraph, output ONLY the single exact matching word from the target paragraph. No punctuation, no explanations, just that one word.',
+                      },
+                      {
+                        'role': 'user',
+                        'content':
+                            'Tapped word: "$cleanWord"\nSource paragraph: "$sourceParagraph"\nTarget paragraph: "$targetParagraph"\nExact matching word from Target paragraph:',
+                      },
+                    ],
+                  }),
+                )
+                .timeout(const Duration(seconds: 7));
 
-          if (response.statusCode >= 200 && response.statusCode < 300) {
-            final decoded = jsonDecode(utf8.decode(response.bodyBytes));
-            final rawReply =
-                decoded['choices']?[0]?['message']?['content']?.toString() ??
-                    '';
-            final cleanedReply = rawReply
-                .trim()
-                .replaceAll(RegExp(r'^["«“„]+|["»”„.,!?;:]+$'), '');
-            if (cleanedReply.isNotEmpty) {
-              return cleanedReply;
+            if (response.statusCode >= 200 && response.statusCode < 300) {
+              final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+              final rawReply =
+                  decoded['choices']?[0]?['message']?['content']?.toString() ??
+                      '';
+              final cleanedReply = rawReply
+                  .trim()
+                  .replaceAll(RegExp(r'^["«“„]+|["»”„.,!?;:]+$'), '');
+              if (cleanedReply.isNotEmpty) {
+                return cleanedReply;
+              }
             }
+          } catch (_) {
+            continue;
           }
         }
-      } catch (_) {
-        // При любой сетевой задержке мгновенно переходим к локальному переводу слова
       }
     }
 
-    // 2. Офлайн-перевод слова в нужном направлении (RU->EN или EN->RU)
     try {
       return await OfflineTranslatorService.instance.translateText(
         cleanWord,
@@ -174,6 +174,23 @@ class TranslatorService {
     }
   }
 
+  Future<List<String>> _translateWithOfflineMlKit(
+    List<String> paragraphs,
+    String targetLanguage,
+    void Function(String activeModel)? onModelSelected,
+  ) async {
+    onModelSelected?.call('Offline ML Kit');
+    final results = <String>[];
+    for (final p in paragraphs) {
+      final tr = await OfflineTranslatorService.instance.translateText(
+        p,
+        targetLanguage: targetLanguage,
+      );
+      results.add(tr);
+    }
+    return results;
+  }
+
   Future<List<String>> translateBatch({
     required List<String> paragraphs,
     required List<String> previousContext,
@@ -183,76 +200,108 @@ class TranslatorService {
     if (paragraphs.isEmpty) return [];
 
     if (settings.engineMode == TranslationEngineMode.offlineLocal) {
-      onModelSelected?.call('Offline ML Kit');
-      final results = <String>[];
-      for (final p in paragraphs) {
-        final tr = await OfflineTranslatorService.instance.translateText(
-          p,
-          targetLanguage: targetLanguage,
-        );
-        results.add(tr);
-      }
-      return results;
-    }
-
-    if (settings.apiKey.trim().isEmpty) {
-      throw Exception(
-        'Не подключён переводчик: вставьте ключ Groq или включите офлайн-модель в настройках',
+      return _translateWithOfflineMlKit(
+        paragraphs,
+        targetLanguage,
+        onModelSelected,
       );
     }
 
-    final pool = settings.activeModelPool;
-    if (pool.isEmpty) {
-      throw Exception('Не указаны модели в настройках');
+    final providers = settings.effectiveProviders;
+    if (providers.isEmpty) {
+      if (settings.fallbackToOfflineOnError) {
+        return _translateWithOfflineMlKit(
+          paragraphs,
+          targetLanguage,
+          onModelSelected,
+        );
+      }
+      throw Exception(
+        'Не подключён ни один ИИ-провайдер: добавьте ключ в настройках или переключитесь на Офлайн-словарь',
+      );
     }
 
-    final availableModels =
-        pool.where((m) => !isModelCoolingDown(m)).toList();
+    // Собираем все пары (Провайдер -> Модель) в порядке приоритета
+    final routes = <({ApiProviderProfile provider, String model})>[];
+    for (final p in providers) {
+      for (final m in p.models) {
+        routes.add((provider: p, model: m));
+      }
+    }
 
-    if (availableModels.isEmpty) {
+    final availableRoutes = routes
+        .where((r) => !isRouteCoolingDown(r.provider, r.model))
+        .toList();
+
+    if (availableRoutes.isEmpty) {
+      if (settings.fallbackToOfflineOnError) {
+        return _translateWithOfflineMlKit(
+          paragraphs,
+          targetLanguage,
+          onModelSelected,
+        );
+      }
       final waitSec = getShortestCooldownSeconds().clamp(3, 90);
       throw ModelRateLimitException(
-        model: pool.first,
+        model: '${routes.first.provider.name}: ${routes.first.model}',
         retryAfterSeconds: waitSec,
-        rawMessage: 'Все модели временно в лимите',
+        rawMessage: 'Все подключённые модели временно в лимите',
       );
     }
 
     Exception? lastError;
 
-    for (final candidateModel in availableModels) {
-      onModelSelected?.call(candidateModel);
+    for (final route in availableRoutes) {
+      final badge = '${route.provider.name} • ${route.model}';
+      onModelSelected?.call(badge);
+
       try {
-        return await _callModelWithRetry(
-          model: candidateModel,
+        return await _callRouteWithRetry(
+          provider: route.provider,
+          model: route.model,
           paragraphs: paragraphs,
           previousContext: previousContext,
           targetLanguage: targetLanguage,
         );
       } on ModelRateLimitException catch (rateErr) {
-        _modelCooldownUntil[candidateModel] =
+        _routeCooldownUntil[_routeKey(route.provider, route.model)] =
             DateTime.now().add(Duration(seconds: rateErr.retryAfterSeconds));
         lastError = rateErr;
         continue;
       } catch (e) {
+        // При любой ошибке (403 Forbidden, 500, таймаут, сбой JSON) ставим связку на короткую паузу и идём к следующей модели/провайдеру
+        _routeCooldownUntil[_routeKey(route.provider, route.model)] =
+            DateTime.now().add(const Duration(seconds: 25));
         lastError = e is Exception ? e : Exception(e.toString());
         continue;
       }
     }
 
+    // Если все онлайн-провайдеры и модели выдали ошибку, но включён страховочный переход на офлайн-словарь
+    if (settings.fallbackToOfflineOnError) {
+      try {
+        return await _translateWithOfflineMlKit(
+          paragraphs,
+          targetLanguage,
+          onModelSelected,
+        );
+      } catch (_) {}
+    }
+
     final waitSec = getShortestCooldownSeconds();
     if (waitSec > 0) {
       throw ModelRateLimitException(
-        model: pool.first,
+        model: availableRoutes.first.model,
         retryAfterSeconds: waitSec.clamp(3, 90),
         rawMessage: lastError?.toString() ?? 'Все модели достигли лимита',
       );
     }
 
-    throw lastError ?? Exception('Не удалось выполнить перевод');
+    throw lastError ?? Exception('Ни одна из подключённых моделей не ответила');
   }
 
-  Future<List<String>> _callModelWithRetry({
+  Future<List<String>> _callRouteWithRetry({
+    required ApiProviderProfile provider,
     required String model,
     required List<String> paragraphs,
     required List<String> previousContext,
@@ -264,6 +313,7 @@ class TranslatorService {
     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         return await _sendRequest(
+          provider: provider,
           model: model,
           paragraphs: paragraphs,
           previousContext: previousContext,
@@ -274,20 +324,22 @@ class TranslatorService {
       } catch (e) {
         attemptError = e is Exception ? e : Exception(e.toString());
         if (attempt < maxAttempts) {
-          await Future.delayed(Duration(milliseconds: 900 * attempt));
+          await Future.delayed(Duration(milliseconds: 700 * attempt));
         }
       }
     }
-    throw attemptError ?? Exception('Ошибка запроса к модели $model');
+    throw attemptError ??
+        Exception('Ошибка запроса к ${provider.name} ($model)');
   }
 
   Future<List<String>> _sendRequest({
+    required ApiProviderProfile provider,
     required String model,
     required List<String> paragraphs,
     required List<String> previousContext,
     required String targetLanguage,
   }) async {
-    final uri = Uri.parse(settings.endpointUrl);
+    final uri = Uri.parse(provider.endpointUrl);
 
     final contextBlock = previousContext.isEmpty
         ? 'Нет предыдущего контекста (начало главы).'
@@ -334,11 +386,11 @@ ${jsonEncode(numberedInput)}
             'User-Agent': 'TransReader/1.0',
             'HTTP-Referer': 'https://transreader.app',
             'X-Title': 'TransReader',
-            'Authorization': 'Bearer ${settings.apiKey}',
+            'Authorization': 'Bearer ${provider.apiKey}',
           },
           body: body,
         )
-        .timeout(const Duration(seconds: 60));
+        .timeout(const Duration(seconds: 55));
 
     if (response.statusCode == 429) {
       final retryHeader = response.headers['retry-after'];
@@ -363,7 +415,9 @@ ${jsonEncode(numberedInput)}
           rawMessage: 'API ${response.statusCode}',
         );
       }
-      throw Exception('API ${response.statusCode}: ${response.body}');
+      throw Exception(
+        '${provider.name} (${response.statusCode}): ${response.body}',
+      );
     }
 
     final decoded = jsonDecode(utf8.decode(response.bodyBytes));
