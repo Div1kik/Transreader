@@ -82,7 +82,7 @@ class TranslationQueueController {
   TranslationProgress get currentProgress => _current;
 
   bool _cancelRequested = false;
-  static const int batchSize = 8;
+  static const int batchSize = 6;
 
   TranslationQueueController({
     required this.db,
@@ -144,6 +144,7 @@ class TranslationQueueController {
     required TranslateMode mode,
     int chaptersAhead = 3,
     int specificChapterIndex = 0,
+    bool forceRetranslate = false,
     required String targetLanguage,
   }) async {
     if (_current.isRunning) {
@@ -167,6 +168,13 @@ class TranslationQueueController {
       final endIdx =
           (startIdx + chaptersAhead).clamp(startIdx + 1, allChapters.length);
       targetChapters = allChapters.sublist(startIdx, endIdx);
+    }
+
+    if (forceRetranslate) {
+      await db.clearTranslationsForChapters(
+        bookId,
+        targetChapters.map((c) => c.index).toList(),
+      );
     }
 
     _emit(
@@ -232,10 +240,11 @@ class TranslationQueueController {
           final batch = untranslated.skip(i).take(batchSize).toList();
           final firstOrder = batch.first.orderIndex;
 
+          // Передаём оригинал предыдущих абзацев, чтобы старые ошибки перевода не портили контекст
           final contextStart = (firstOrder - 3).clamp(0, paragraphs.length);
           final previousContext = paragraphs
               .sublist(contextStart, firstOrder)
-              .map((p) => p.translatedText ?? p.sourceText)
+              .map((p) => p.sourceText)
               .toList();
 
           try {
