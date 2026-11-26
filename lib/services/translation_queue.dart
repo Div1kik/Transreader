@@ -7,12 +7,14 @@ import 'translator_service.dart';
 
 enum TranslateMode {
   nextChapters,
+  specificChapter,
   fullBook,
 }
 
 class TranslationProgress {
   final bool isRunning;
   final bool isPausedOffline;
+  final int rateLimitWaitSeconds;
   final String activeBookId;
   final String activeBookTitle;
   final String activeModel;
@@ -20,12 +22,12 @@ class TranslationProgress {
   final int totalChaptersInJob;
   final int translatedParagraphsInChapter;
   final int totalParagraphsInChapter;
-  final int rateLimitWaitSeconds;
   final String? errorMessage;
 
   const TranslationProgress({
     this.isRunning = false,
     this.isPausedOffline = false,
+    this.rateLimitWaitSeconds = 0,
     this.activeBookId = '',
     this.activeBookTitle = '',
     this.activeModel = '',
@@ -33,23 +35,54 @@ class TranslationProgress {
     this.totalChaptersInJob = 0,
     this.translatedParagraphsInChapter = 0,
     this.totalParagraphsInChapter = 0,
-    this.rateLimitWaitSeconds = 0,
     this.errorMessage,
   });
+
+  TranslationProgress copyWith({
+    bool? isRunning,
+    bool? isPausedOffline,
+    int? rateLimitWaitSeconds,
+    String? activeBookId,
+    String? activeBookTitle,
+    String? activeModel,
+    int? currentChapter,
+    int? totalChaptersInJob,
+    int? translatedParagraphsInChapter,
+    int? totalParagraphsInChapter,
+    String? errorMessage,
+  }) {
+    return TranslationProgress(
+      isRunning: isRunning ?? this.isRunning,
+      isPausedOffline: isPausedOffline ?? this.isPausedOffline,
+      rateLimitWaitSeconds: rateLimitWaitSeconds ?? this.rateLimitWaitSeconds,
+      activeBookId: activeBookId ?? this.activeBookId,
+      activeBookTitle: activeBookTitle ?? this.activeBookTitle,
+      activeModel: activeModel ?? this.activeModel,
+      currentChapter: currentChapter ?? this.currentChapter,
+      totalChaptersInJob: totalChaptersInJob ?? this.totalChaptersInJob,
+      translatedParagraphsInChapter:
+          translatedParagraphsInChapter ?? this.translatedParagraphsInChapter,
+      totalParagraphsInChapter:
+          totalParagraphsInChapter ?? this.totalParagraphsInChapter,
+      errorMessage: errorMessage,
+    );
+  }
 }
 
 class TranslationQueueController {
   final BookDatabase db;
   final TranslatorService translator;
 
-  final _progressController = StreamController<TranslationProgress>.broadcast();
+  final StreamController<TranslationProgress> _progressController =
+      StreamController<TranslationProgress>.broadcast();
+
   Stream<TranslationProgress> get progressStream => _progressController.stream;
 
-  TranslationProgress _currentProgress = const TranslationProgress();
-  TranslationProgress get currentProgress => _currentProgress;
+  TranslationProgress _current = const TranslationProgress();
+  TranslationProgress get currentProgress => _current;
 
   bool _cancelRequested = false;
-  int _jobToken = 0;
+  static const int batchSize = 8;
 
   TranslationQueueController({
     required this.db,
@@ -60,47 +93,47 @@ class TranslationQueueController {
     translator.settings = newSettings;
   }
 
-  void _emit(TranslationProgress p) {
-    _currentProgress = p;
+  void _emit(TranslationProgress next) {
+    _current = next;
     if (!_progressController.isClosed) {
-      _progressController.add(p);
+      _progressController.add(next);
     }
   }
 
   void stop() {
     _cancelRequested = true;
-    _jobToken++;
-    _emit(const TranslationProgress(isRunning: false));
-  }
-
-  void dispose() {
-    _progressController.close();
+    _emit(
+      _current.copyWith(
+        isRunning: false,
+        isPausedOffline: false,
+        rateLimitWaitSeconds: 0,
+      ),
+    );
   }
 
   Future<bool> _hasInternet() async {
-    if (translator.settings.engineMode == TranslationEngineMode.offlineLocal) {
-      return true;
-    }
-    final res = await Connectivity().checkConnectivity();
-    return res.any((r) => r != ConnectivityResult.none);
+    final results = await Connectivity().checkConnectivity();
+    return results.any((r) => r != ConnectivityResult.none);
   }
 
-  Future<void> _waitForInternet(
-    int token,
-    String bookId,
-    String bookTitle,
-  ) async {
-    while (!_cancelRequested && token == _jobToken) {
-      if (await _hasInternet()) return;
-      _emit(
-        TranslationProgress(
-          isRunning: true,
-          isPausedOffline: true,
-          activeBookId: bookId,
-          activeBookTitle: bookTitle,
-        ),
-      );
-      await Future.delayed(const Duration(seconds: 2));
+  Future<void> _waitForInternet() async {
+    while (!_cancelRequested) {
+      if (await _hasInternet()) {
+        _emit(_current.copyWith(isPausedOffline: false, errorMessage: null));
+        return;
+      }
+      _emit(_current.copyWith(isPausedOffline: true));
+      await Future.delayed(const Duration(seconds: 3));
+    }
+  }
+
+  Future<void> _waitForCooldown(int seconds) async {
+    for (int left = seconds; left > 0 && !_cancelRequested; left--) {
+      _emit(_current.copyWith(rateLimitWaitSeconds: left, errorMessage: null));
+      await Future.delayed(const Duration(seconds: 1));
+    }
+    if (!_cancelRequested) {
+      _emit(_current.copyWith(rateLimitWaitSeconds: 0));
     }
   }
 
@@ -110,54 +143,55 @@ class TranslationQueueController {
     required int currentReadingChapter,
     required TranslateMode mode,
     int chaptersAhead = 3,
+    int specificChapterIndex = 0,
     required String targetLanguage,
   }) async {
+    if (_current.isRunning) {
+      stop();
+      await Future.delayed(const Duration(milliseconds: 250));
+    }
+
     _cancelRequested = false;
-    final token = ++_jobToken;
 
     final allChapters = await db.getChapters(bookId);
     if (allChapters.isEmpty) return;
 
-    final int startIdx =
-        mode == TranslateMode.fullBook ? 0 : currentReadingChapter;
-    final int endIdx = mode == TranslateMode.fullBook
-        ? allChapters.length - 1
-        : (currentReadingChapter + chaptersAhead)
-            .clamp(0, allChapters.length - 1);
-
-    final targetChapters = <Chapter>[];
-    for (int i = startIdx; i <= endIdx; i++) {
-      if (allChapters[i].status != ChapterStatus.completed) {
-        targetChapters.add(allChapters[i]);
-      }
+    final List<Chapter> targetChapters;
+    if (mode == TranslateMode.fullBook) {
+      targetChapters = allChapters;
+    } else if (mode == TranslateMode.specificChapter) {
+      final safeIdx = specificChapterIndex.clamp(0, allChapters.length - 1);
+      targetChapters = [allChapters[safeIdx]];
+    } else {
+      final startIdx = currentReadingChapter.clamp(0, allChapters.length - 1);
+      final endIdx =
+          (startIdx + chaptersAhead).clamp(startIdx + 1, allChapters.length);
+      targetChapters = allChapters.sublist(startIdx, endIdx);
     }
 
-    if (targetChapters.isEmpty) {
-      _emit(const TranslationProgress(isRunning: false));
-      return;
-    }
+    _emit(
+      TranslationProgress(
+        isRunning: true,
+        activeBookId: bookId,
+        activeBookTitle: bookTitle,
+        totalChaptersInJob: targetChapters.length,
+      ),
+    );
 
-    String activeModel = '';
+    final isOfflineMode =
+        translator.settings.engineMode == TranslationEngineMode.offlineLocal;
 
     try {
-      for (int cIdx = 0; cIdx < targetChapters.length; cIdx++) {
-        if (_cancelRequested || token != _jobToken) return;
+      for (final chapter in targetChapters) {
+        if (_cancelRequested) break;
 
-        final chapter = targetChapters[cIdx];
-        await db.updateChapterStatus(
-          bookId,
-          chapter.index,
-          ChapterStatus.inProgress,
-        );
+        final paragraphs = await db.getChapterParagraphs(bookId, chapter.index);
+        if (paragraphs.isEmpty) continue;
 
-        final paragraphs = await db.getChapterParagraphs(
-          bookId,
-          chapter.index,
-        );
-        final untranslated =
-            paragraphs.where((p) => !p.isTranslated).toList();
+        final alreadyTranslatedCount =
+            paragraphs.where((p) => p.isTranslated).length;
 
-        if (untranslated.isEmpty) {
+        if (alreadyTranslatedCount == paragraphs.length) {
           await db.updateChapterStatus(
             bookId,
             chapter.index,
@@ -166,116 +200,118 @@ class TranslationQueueController {
           continue;
         }
 
-        int doneInChapter = paragraphs.length - untranslated.length;
-        const batchSize = 5;
-
-        for (int i = 0; i < untranslated.length; i += batchSize) {
-          if (_cancelRequested || token != _jobToken) return;
-
-          await _waitForInternet(token, bookId, bookTitle);
-          if (_cancelRequested || token != _jobToken) return;
-
-          final chunk = untranslated.skip(i).take(batchSize).toList();
-          final firstOrder = chunk.first.orderIndex;
-
-          final prevContext = paragraphs
-              .where((p) => p.orderIndex < firstOrder && p.isTranslated)
-              .toList()
-              .reversed
-              .take(3)
-              .toList()
-              .reversed
-              .map((p) => p.translatedText!)
-              .toList();
-
-          _emit(
-            TranslationProgress(
-              isRunning: true,
-              activeBookId: bookId,
-              activeBookTitle: bookTitle,
-              activeModel: activeModel,
-              currentChapter: chapter.index + 1,
-              totalChaptersInJob: targetChapters.length,
-              translatedParagraphsInChapter: doneInChapter,
-              totalParagraphsInChapter: paragraphs.length,
-            ),
-          );
-
-          List<String> translatedChunk;
-          while (true) {
-            if (_cancelRequested || token != _jobToken) return;
-            try {
-              translatedChunk = await translator.translateBatch(
-                paragraphs: chunk.map((e) => e.sourceText).toList(),
-                previousContext: prevContext,
-                targetLanguage: targetLanguage,
-                onModelSelected: (m) => activeModel = m,
-              );
-              break;
-            } on ModelRateLimitException catch (rateErr) {
-              for (int sec = rateErr.retryAfterSeconds; sec > 0; sec--) {
-                if (_cancelRequested || token != _jobToken) return;
-                _emit(
-                  TranslationProgress(
-                    isRunning: true,
-                    activeBookId: bookId,
-                    activeBookTitle: bookTitle,
-                    activeModel: activeModel,
-                    currentChapter: chapter.index + 1,
-                    totalChaptersInJob: targetChapters.length,
-                    translatedParagraphsInChapter: doneInChapter,
-                    totalParagraphsInChapter: paragraphs.length,
-                    rateLimitWaitSeconds: sec,
-                  ),
-                );
-                await Future.delayed(const Duration(seconds: 1));
-              }
-            }
-          }
-
-          for (int k = 0; k < chunk.length; k++) {
-            final item = chunk[k];
-            if (item.id != null) {
-              await db.updateParagraphTranslation(item.id!, translatedChunk[k]);
-            }
-          }
-
-          doneInChapter += chunk.length;
-          _emit(
-            TranslationProgress(
-              isRunning: true,
-              activeBookId: bookId,
-              activeBookTitle: bookTitle,
-              activeModel: activeModel,
-              currentChapter: chapter.index + 1,
-              totalChaptersInJob: targetChapters.length,
-              translatedParagraphsInChapter: doneInChapter,
-              totalParagraphsInChapter: paragraphs.length,
-            ),
-          );
-        }
-
         await db.updateChapterStatus(
           bookId,
           chapter.index,
-          ChapterStatus.completed,
+          ChapterStatus.inProgress,
         );
-      }
 
-      if (token == _jobToken) {
-        _emit(const TranslationProgress(isRunning: false));
-      }
-    } catch (e) {
-      if (token == _jobToken) {
+        int translatedCount = alreadyTranslatedCount;
         _emit(
-          TranslationProgress(
-            isRunning: false,
-            activeBookId: bookId,
-            activeBookTitle: bookTitle,
-            errorMessage: e.toString().replaceFirst('Exception: ', ''),
+          _current.copyWith(
+            isRunning: true,
+            currentChapter: chapter.index + 1,
+            translatedParagraphsInChapter: translatedCount,
+            totalParagraphsInChapter: paragraphs.length,
+            errorMessage: null,
           ),
         );
+
+        final untranslated =
+            paragraphs.where((p) => !p.isTranslated).toList();
+
+        int i = 0;
+        while (i < untranslated.length) {
+          if (_cancelRequested) break;
+
+          if (!isOfflineMode && !await _hasInternet()) {
+            await _waitForInternet();
+            if (_cancelRequested) break;
+          }
+
+          final batch = untranslated.skip(i).take(batchSize).toList();
+          final firstOrder = batch.first.orderIndex;
+
+          final contextStart = (firstOrder - 3).clamp(0, paragraphs.length);
+          final previousContext = paragraphs
+              .sublist(contextStart, firstOrder)
+              .map((p) => p.translatedText ?? p.sourceText)
+              .toList();
+
+          try {
+            final translations = await translator.translateBatch(
+              paragraphs: batch.map((p) => p.sourceText).toList(),
+              previousContext: previousContext,
+              targetLanguage: targetLanguage,
+              onModelSelected: (activeModel) {
+                _emit(_current.copyWith(activeModel: activeModel));
+              },
+            );
+
+            for (int j = 0; j < batch.length; j++) {
+              final item = batch[j];
+              if (item.id != null) {
+                await db.updateParagraphTranslation(item.id!, translations[j]);
+              }
+            }
+
+            translatedCount += batch.length;
+            i += batch.length;
+
+            _emit(
+              _current.copyWith(
+                translatedParagraphsInChapter: translatedCount,
+                totalParagraphsInChapter: paragraphs.length,
+                errorMessage: null,
+              ),
+            );
+
+            if (i < untranslated.length && !_cancelRequested && !isOfflineMode) {
+              await Future.delayed(const Duration(milliseconds: 800));
+            }
+          } on ModelRateLimitException catch (rateErr) {
+            await _waitForCooldown(rateErr.retryAfterSeconds);
+          }
+        }
+
+        if (_cancelRequested) {
+          await db.updateChapterStatus(
+            bookId,
+            chapter.index,
+            translatedCount > 0
+                ? ChapterStatus.partial
+                : ChapterStatus.pending,
+          );
+          break;
+        } else {
+          await db.updateChapterStatus(
+            bookId,
+            chapter.index,
+            ChapterStatus.completed,
+          );
+        }
       }
+
+      _emit(
+        _current.copyWith(
+          isRunning: false,
+          isPausedOffline: false,
+          rateLimitWaitSeconds: 0,
+        ),
+      );
+    } catch (e) {
+      _emit(
+        _current.copyWith(
+          isRunning: false,
+          isPausedOffline: false,
+          rateLimitWaitSeconds: 0,
+          errorMessage: e.toString().replaceFirst('Exception: ', ''),
+        ),
+      );
     }
+  }
+
+  void dispose() {
+    _progressController.close();
   }
 }
