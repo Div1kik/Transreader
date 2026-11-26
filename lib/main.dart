@@ -243,28 +243,35 @@ class _LibraryScreenState extends State<LibraryScreen> {
     await _reloadAll();
   }
 
-  void _openBook(Book book) {
-    Navigator.of(context)
-        .push(
-          MaterialPageRoute(
-            builder: (_) => ReaderScreen(
-              book: book,
-              queueController: _queueController,
-              translatorService: _translatorService,
-              targetLanguage: _settings.targetLanguage,
-            ),
-          ),
-        )
-        .then((_) => _reloadAll());
+  Future<void> _openBook(Book book) async {
+    final latestBook = await BookDatabase.instance.getBookById(book.id) ?? book;
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ReaderScreen(
+          book: latestBook,
+          queueController: _queueController,
+          translatorService: _translatorService,
+          settingsService: _settingsService,
+          initialSettings: _settings,
+          onSettingsChanged: (updated) {
+            if (mounted) setState(() => _settings = updated);
+          },
+        ),
+      ),
+    );
+    await _reloadAll();
   }
 
   void _downloadFullBook(Book book) {
     final isOffline = _settings.engineMode == TranslationEngineMode.offlineLocal;
-    if (!isOffline && _settings.apiKey.trim().isEmpty) {
+    if (!isOffline &&
+        !_settings.hasAnyOnlineKey &&
+        !_settings.fallbackToOfflineOnError) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'Подключите ключ Groq или включите офлайн-модель в настройках',
+            'Подключите ИИ-провайдера или включите офлайн-словарь в настройках',
           ),
         ),
       );
@@ -502,6 +509,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
             (p.isRunning || p.rateLimitWaitSeconds > 0) &&
                 p.activeBookId == book.id;
 
+        final hasProgress =
+            book.lastChapterIndex > 0 || book.lastPageIndex > 0;
+        final progressText = hasProgress
+            ? ' • Остановились: гл. ${book.lastChapterIndex + 1}, стр. ${book.lastPageIndex + 1}'
+            : '';
+
         return Card(
           child: ListTile(
             contentPadding: const EdgeInsets.symmetric(
@@ -531,7 +544,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               child: Text(
                 isThisDownloading
                     ? 'Переводится: гл. ${p.currentChapter} (${p.translatedParagraphsInChapter}/${p.totalParagraphsInChapter})'
-                    : 'Формат: ${book.format.toUpperCase()} • Глав: ${book.totalChapters}',
+                    : '${book.format.toUpperCase()} • Глав: ${book.totalChapters}$progressText',
                 style: TextStyle(
                   color:
                       isThisDownloading ? accent : const Color(0xFFA89E93),
