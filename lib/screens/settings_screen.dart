@@ -22,14 +22,10 @@ class _SettingsScreenState extends State<SettingsScreen>
     with WidgetsBindingObserver {
   final SettingsService _settingsService = SettingsService();
   late TranslationEngineMode _engineMode;
-  late TextEditingController _endpointController;
-  late TextEditingController _apiKeyController;
-  late TextEditingController _modelController;
-  late TextEditingController _fallbacksController;
+  late List<ApiProviderProfile> _providers;
+  late bool _fallbackToOfflineOnError;
   late TextEditingController _langController;
 
-  bool _obscureKey = true;
-  bool _advancedExpanded = false;
   bool _downloadingOfflineModel = false;
   String? _offlineStatusStep;
   bool _offlineModelReady = false;
@@ -41,19 +37,14 @@ class _SettingsScreenState extends State<SettingsScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _engineMode = widget.initialSettings.engineMode;
-    _endpointController =
-        TextEditingController(text: widget.initialSettings.endpointUrl);
-    _apiKeyController =
-        TextEditingController(text: widget.initialSettings.apiKey);
-    _modelController =
-        TextEditingController(text: widget.initialSettings.model);
-    _fallbacksController = TextEditingController(
-      text: widget.initialSettings.fallbackModels.join(', '),
+    _providers = List<ApiProviderProfile>.from(
+      widget.initialSettings.effectiveProviders,
     );
+    _fallbackToOfflineOnError =
+        widget.initialSettings.fallbackToOfflineOnError;
     _langController =
         TextEditingController(text: widget.initialSettings.targetLanguage);
 
-    _advancedExpanded = _engineMode == TranslationEngineMode.customApi;
     _checkOfflineModel();
   }
 
@@ -68,7 +59,6 @@ class _SettingsScreenState extends State<SettingsScreen>
   Future<void> _openGroqKeysPage() async {
     _waitingForGroqKey = true;
     final uri = Uri.parse('https://console.groq.com/keys');
-    // Открываем в Chrome Custom Tab — сверху будет крестик «✕» для возврата в 1 тап
     final launched = await launchUrl(
       uri,
       mode: LaunchMode.inAppBrowserView,
@@ -91,13 +81,34 @@ class _SettingsScreenState extends State<SettingsScreen>
       if (!mounted) return;
       setState(() {
         _engineMode = TranslationEngineMode.groqCloud;
-        _apiKeyController.text = clipText;
-        _endpointController.text =
-            'https://api.groq.com/openai/v1/chat/completions';
-        _modelController.text = 'llama-3.3-70b-versatile';
-        _fallbacksController.text =
-            'openai/gpt-oss-120b, openai/gpt-oss-20b, meta-llama/llama-4-scout-17b-16e-instruct';
+        final existingIdx = _providers.indexWhere(
+          (p) => p.endpointUrl.contains('groq.com'),
+        );
+        final updatedGroq = ApiProviderProfile(
+          id: existingIdx >= 0
+              ? _providers[existingIdx].id
+              : 'groq_${DateTime.now().millisecondsSinceEpoch}',
+          name: 'Groq Free',
+          endpointUrl: 'https://api.groq.com/openai/v1/chat/completions',
+          apiKey: clipText,
+          models: existingIdx >= 0 && _providers[existingIdx].models.isNotEmpty
+              ? _providers[existingIdx].models
+              : const [
+                  'llama-3.3-70b-versatile',
+                  'openai/gpt-oss-120b',
+                  'openai/gpt-oss-20b',
+                  'meta-llama/llama-4-scout-17b-16e-instruct',
+                ],
+          enabled: true,
+        );
+
+        if (existingIdx >= 0) {
+          _providers[existingIdx] = updatedGroq;
+        } else {
+          _providers.insert(0, updatedGroq);
+        }
       });
+
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Ключ Groq (gsk_...) подхвачен и сохранён!'),
@@ -113,6 +124,179 @@ class _SettingsScreenState extends State<SettingsScreen>
         ),
       );
     }
+  }
+
+  void _openProviderEditor({ApiProviderProfile? existing, int? index}) {
+    final nameCtrl = TextEditingController(
+      text: existing?.name ?? 'Groq / OpenRouter',
+    );
+    final endpointCtrl = TextEditingController(
+      text: existing?.endpointUrl ??
+          'https://api.groq.com/openai/v1/chat/completions',
+    );
+    final keyCtrl = TextEditingController(text: existing?.apiKey ?? '');
+    final modelsCtrl = TextEditingController(
+      text: existing?.models.join(', ') ??
+          'llama-3.3-70b-versatile, openai/gpt-oss-120b',
+    );
+    bool obscure = true;
+
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            return Padding(
+              padding: EdgeInsets.fromLTRB(
+                20,
+                16,
+                20,
+                MediaQuery.of(ctx).viewInsets.bottom + 24,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(
+                      existing == null
+                          ? 'Добавить ИИ-провайдера'
+                          : 'Настройка провайдера',
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        ActionChip(
+                          label: const Text('Шаблон Groq'),
+                          onPressed: () {
+                            setModalState(() {
+                              nameCtrl.text = 'Groq Free';
+                              endpointCtrl.text =
+                                  'https://api.groq.com/openai/v1/chat/completions';
+                              modelsCtrl.text =
+                                  'llama-3.3-70b-versatile, openai/gpt-oss-120b, openai/gpt-oss-20b, meta-llama/llama-4-scout-17b-16e-instruct';
+                            });
+                          },
+                        ),
+                        ActionChip(
+                          label: const Text('Шаблон OpenRouter'),
+                          onPressed: () {
+                            setModalState(() {
+                              nameCtrl.text = 'OpenRouter Free';
+                              endpointCtrl.text =
+                                  'https://openrouter.ai/api/v1/chat/completions';
+                              modelsCtrl.text =
+                                  'meta-llama/llama-3.3-70b-instruct:free, google/gemma-3-27b-it:free, mistralai/mistral-small-3.1-24b-instruct:free';
+                            });
+                          },
+                        ),
+                        ActionChip(
+                          label: const Text('Шаблон Gemini OpenAI'),
+                          onPressed: () {
+                            setModalState(() {
+                              nameCtrl.text = 'Google Gemini';
+                              endpointCtrl.text =
+                                  'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+                              modelsCtrl.text =
+                                  'gemini-2.5-flash, gemini-2.0-flash';
+                            });
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: nameCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Название (например, Groq 1 или OpenRouter)',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: endpointCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Endpoint URL',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: keyCtrl,
+                      obscureText: obscure,
+                      decoration: InputDecoration(
+                        labelText: 'API Key',
+                        border: const OutlineInputBorder(),
+                        suffixIcon: IconButton(
+                          icon: Icon(
+                            obscure ? Icons.visibility : Icons.visibility_off,
+                          ),
+                          onPressed: () =>
+                              setModalState(() => obscure = !obscure),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: modelsCtrl,
+                      maxLines: 2,
+                      decoration: const InputDecoration(
+                        labelText: 'Модели через запятую (в порядке приоритета)',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    FilledButton.icon(
+                      onPressed: () {
+                        final modelsList = modelsCtrl.text
+                            .split(',')
+                            .map((e) => e.trim())
+                            .where((e) => e.isNotEmpty)
+                            .toList();
+                        if (keyCtrl.text.trim().isEmpty || modelsList.isEmpty) {
+                          return;
+                        }
+                        final profile = ApiProviderProfile(
+                          id: existing?.id ??
+                              DateTime.now().microsecondsSinceEpoch.toString(),
+                          name: nameCtrl.text.trim().isEmpty
+                              ? 'API Провайдер'
+                              : nameCtrl.text.trim(),
+                          endpointUrl: endpointCtrl.text.trim(),
+                          apiKey: keyCtrl.text.trim(),
+                          models: modelsList,
+                          enabled: existing?.enabled ?? true,
+                        );
+                        setState(() {
+                          _engineMode = TranslationEngineMode.groqCloud;
+                          if (index != null) {
+                            _providers[index] = profile;
+                          } else {
+                            _providers.add(profile);
+                          }
+                        });
+                        Navigator.of(ctx).pop();
+                      },
+                      icon: const Icon(Icons.check),
+                      label: const Text('Применить'),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   Future<void> _checkOfflineModel() async {
@@ -144,13 +328,10 @@ class _SettingsScreenState extends State<SettingsScreen>
       setState(() {
         _offlineModelReady = true;
         _offlineStatusStep = null;
-        _engineMode = TranslationEngineMode.offlineLocal;
       });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text(
-            'Офлайн-модель скачана! Теперь можно переводить без интернета.',
-          ),
+          content: Text('Офлайн-модель скачана и готова к работе!'),
         ),
       );
     } catch (e) {
@@ -178,7 +359,7 @@ class _SettingsScreenState extends State<SettingsScreen>
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content:
-                Text('Резервная копия книг и словаря успешно сохранена!'),
+                Text('Резервная копия книг, прогресса и словаря сохранена!'),
           ),
         );
       }
@@ -200,7 +381,7 @@ class _SettingsScreenState extends State<SettingsScreen>
       if (restored) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Библиотека и словарь успешно восстановлены!'),
+            content: Text('Библиотека, прогресс и словарь восстановлены!'),
           ),
         );
       }
@@ -217,27 +398,29 @@ class _SettingsScreenState extends State<SettingsScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _endpointController.dispose();
-    _apiKeyController.dispose();
-    _modelController.dispose();
-    _fallbacksController.dispose();
     _langController.dispose();
     super.dispose();
   }
 
   Future<void> _save() async {
-    final fallbacks = _fallbacksController.text
-        .split(',')
-        .map((e) => e.trim())
-        .where((e) => e.isNotEmpty)
-        .toList();
+    final activeFirst = _providers.where((p) => p.enabled).firstOrNull ??
+        (_providers.isNotEmpty ? _providers.first : null);
 
     final updated = TranslatorSettings(
       engineMode: _engineMode,
-      endpointUrl: _endpointController.text.trim(),
-      apiKey: _apiKeyController.text.trim(),
-      model: _modelController.text.trim(),
-      fallbackModels: fallbacks,
+      endpointUrl: activeFirst?.endpointUrl ??
+          'https://api.groq.com/openai/v1/chat/completions',
+      apiKey: activeFirst?.apiKey ?? '',
+      model: activeFirst?.models.firstOrNull ?? 'llama-3.3-70b-versatile',
+      fallbackModels: activeFirst != null && activeFirst.models.length > 1
+          ? activeFirst.models.sublist(1)
+          : const [
+              'openai/gpt-oss-120b',
+              'openai/gpt-oss-20b',
+              'meta-llama/llama-4-scout-17b-16e-instruct',
+            ],
+      providers: _providers,
+      fallbackToOfflineOnError: _fallbackToOfflineOnError,
       targetLanguage: _langController.text.trim().isEmpty
           ? 'Russian'
           : _langController.text.trim(),
@@ -250,7 +433,6 @@ class _SettingsScreenState extends State<SettingsScreen>
   @override
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.primary;
-    final hasKey = _apiKeyController.text.trim().isNotEmpty;
 
     return Scaffold(
       appBar: AppBar(
@@ -268,6 +450,7 @@ class _SettingsScreenState extends State<SettingsScreen>
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          // БЛОК 1: Подключённые ИИ-провайдеры и автопереключение между ними
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -276,39 +459,160 @@ class _SettingsScreenState extends State<SettingsScreen>
                 children: [
                   Row(
                     children: [
-                      Icon(Icons.bolt, color: accent),
+                      Icon(Icons.hub_outlined, color: accent),
                       const SizedBox(width: 8),
                       const Expanded(
                         child: Text(
-                          'Подключение Groq (основной режим)',
+                          'ИИ-провайдеры и автопереключение',
                           style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
                           ),
                         ),
                       ),
-                      if (hasKey &&
-                          _engineMode == TranslationEngineMode.groqCloud)
-                        const Icon(
-                          Icons.check_circle,
-                          color: Colors.greenAccent,
-                          size: 20,
-                        ),
                     ],
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 6),
                   const Text(
-                    '1. Нажмите кнопку ниже, создайте и скопируйте ключ (gsk_...).\n2. Нажмите крестик «✕» в левом верхнем углу вкладки — ключ подхватится сам.',
+                    'Добавьте один или несколько ключей (Groq, OpenRouter, Gemini). Если одна модель или провайдер выдаст ошибку или лимит — переводчик сам переключится на следующий.',
                     style: TextStyle(fontSize: 13, color: Color(0xFFA89E93)),
                   ),
-                  const SizedBox(height: 14),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton.icon(
-                      onPressed: _openGroqKeysPage,
-                      icon: const Icon(Icons.open_in_new),
-                      label: const Text('1. Получить ключ на Groq'),
-                    ),
+                  const SizedBox(height: 12),
+
+                  if (_providers.isEmpty)
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF191613),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: const Text(
+                        'Пока не добавлено ни одного ключа. Нажмите кнопку ниже, чтобы получить ключ Groq или добавить провайдера вручную.',
+                        style: TextStyle(fontSize: 12, color: Color(0xFFA89E93)),
+                      ),
+                    )
+                  else
+                    for (int i = 0; i < _providers.length; i++)
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF191613),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: _providers[i].enabled
+                                ? accent.withOpacity(0.4)
+                                : Colors.white12,
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                CircleAvatar(
+                                  radius: 11,
+                                  backgroundColor: accent.withOpacity(0.2),
+                                  child: Text(
+                                    '${i + 1}',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold,
+                                      color: accent,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    _providers[i].name,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 14,
+                                    ),
+                                  ),
+                                ),
+                                Switch(
+                                  activeColor: accent,
+                                  value: _providers[i].enabled,
+                                  onChanged: (v) {
+                                    setState(() {
+                                      _providers[i] =
+                                          _providers[i].copyWith(enabled: v);
+                                    });
+                                  },
+                                ),
+                              ],
+                            ),
+                            Text(
+                              'Модели: ${_providers[i].models.join(', ')}',
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Color(0xFFA89E93),
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.end,
+                              children: [
+                                if (i > 0)
+                                  IconButton(
+                                    tooltip: 'Поднять приоритет',
+                                    icon: const Icon(Icons.arrow_upward, size: 18),
+                                    onPressed: () {
+                                      setState(() {
+                                        final item = _providers.removeAt(i);
+                                        _providers.insert(i - 1, item);
+                                      });
+                                    },
+                                  ),
+                                IconButton(
+                                  tooltip: 'Редактировать',
+                                  icon: const Icon(Icons.edit_outlined, size: 18),
+                                  onPressed: () => _openProviderEditor(
+                                    existing: _providers[i],
+                                    index: i,
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: 'Удалить',
+                                  icon: const Icon(
+                                    Icons.delete_outline,
+                                    size: 18,
+                                    color: Colors.redAccent,
+                                  ),
+                                  onPressed: () {
+                                    setState(() => _providers.removeAt(i));
+                                  },
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: _openGroqKeysPage,
+                          icon: const Icon(Icons.open_in_new, size: 18),
+                          label: const Text('Ключ Groq'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () => _openProviderEditor(),
+                          icon: const Icon(Icons.add, size: 18),
+                          label: const Text('Добавить API'),
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 8),
                   SizedBox(
@@ -316,34 +620,21 @@ class _SettingsScreenState extends State<SettingsScreen>
                     child: OutlinedButton.icon(
                       onPressed: () =>
                           _tryPasteGroqKeyFromClipboard(silentIfNotFound: false),
-                      icon: const Icon(Icons.content_paste_go),
-                      label: const Text('2. Вставить ключ из буфера и включить'),
+                      icon: const Icon(Icons.content_paste_go, size: 18),
+                      label: const Text('Вставить ключ Groq из буфера'),
                     ),
                   ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _apiKeyController,
-                    obscureText: _obscureKey,
-                    onChanged: (val) {
-                      if (val.trim().startsWith('gsk_')) {
-                        _engineMode = TranslationEngineMode.groqCloud;
-                        _endpointController.text =
-                            'https://api.groq.com/openai/v1/chat/completions';
-                      }
-                      setState(() {});
-                    },
-                    decoration: InputDecoration(
-                      labelText: 'Ключ Groq (gsk_...)',
-                      hintText: 'gsk_...',
-                      border: const OutlineInputBorder(),
-                      suffixIcon: IconButton(
-                        icon: Icon(
-                          _obscureKey ? Icons.visibility : Icons.visibility_off,
-                        ),
-                        onPressed: () =>
-                            setState(() => _obscureKey = !_obscureKey),
-                      ),
+                  const SizedBox(height: 6),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    activeColor: accent,
+                    title: const Text(
+                      'Страховка: переходить на офлайн-словарь при сбое всех ИИ',
+                      style: TextStyle(fontSize: 13),
                     ),
+                    value: _fallbackToOfflineOnError,
+                    onChanged: (v) =>
+                        setState(() => _fallbackToOfflineOnError = v),
                   ),
                 ],
               ),
@@ -352,6 +643,7 @@ class _SettingsScreenState extends State<SettingsScreen>
 
           const SizedBox(height: 12),
 
+          // БЛОК 2: Встроенный офлайн-переводчик (Google ML Kit)
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -394,7 +686,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                   ),
                   const SizedBox(height: 6),
                   const Text(
-                    'Работает вообще без интернета и ключей. Скачивает языковую модель (~30 МБ) один раз прямо в телефон.',
+                    'Работает без интернета и ключей. Переключать режим (ИИ / Офлайн) можно также прямо в верхней панели читалки.',
                     style: TextStyle(fontSize: 13, color: Color(0xFFA89E93)),
                   ),
                   const SizedBox(height: 12),
@@ -441,6 +733,7 @@ class _SettingsScreenState extends State<SettingsScreen>
 
           const SizedBox(height: 12),
 
+          // БЛОК 3: Резервное копирование библиотеки книг, прогресса и словаря
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -453,7 +746,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                       const SizedBox(width: 8),
                       const Expanded(
                         child: Text(
-                          'Резервная копия книг и словаря',
+                          'Резервная копия книг, прогресса и словаря',
                           style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
@@ -464,7 +757,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                   ),
                   const SizedBox(height: 6),
                   const Text(
-                    'Сохраняет все книги, готовые переводы и личный словарь в один файл .db, чтобы не потерять их при переустановке.',
+                    'Сохраняет все книги, места остановки чтения, переводы и личный словарь в один файл .db.',
                     style: TextStyle(fontSize: 13, color: Color(0xFFA89E93)),
                   ),
                   const SizedBox(height: 12),
@@ -494,6 +787,7 @@ class _SettingsScreenState extends State<SettingsScreen>
 
           const SizedBox(height: 12),
 
+          // БЛОК 4: Язык перевода
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -506,94 +800,6 @@ class _SettingsScreenState extends State<SettingsScreen>
                   border: OutlineInputBorder(),
                 ),
               ),
-            ),
-          ),
-
-          const SizedBox(height: 12),
-
-          Card(
-            child: ExpansionTile(
-              initiallyExpanded: _advancedExpanded,
-              onExpansionChanged: (v) => setState(() => _advancedExpanded = v),
-              leading: Icon(Icons.tune, color: accent),
-              title: const Text(
-                'Для продвинутых пользователей',
-                style: TextStyle(fontWeight: FontWeight.w600),
-              ),
-              subtitle: const Text(
-                'Настройка Endpoint URL и пула моделей (Groq, OpenRouter, Gemini)',
-                style: TextStyle(fontSize: 12, color: Color(0xFFA89E93)),
-              ),
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Wrap(
-                        spacing: 8,
-                        children: [
-                          ActionChip(
-                            label: const Text('Groq Free (Рекомендуемый)'),
-                            onPressed: () {
-                              setState(() {
-                                _engineMode = TranslationEngineMode.groqCloud;
-                                _endpointController.text =
-                                    'https://api.groq.com/openai/v1/chat/completions';
-                                _modelController.text =
-                                    'llama-3.3-70b-versatile';
-                                _fallbacksController.text =
-                                    'openai/gpt-oss-120b, openai/gpt-oss-20b, meta-llama/llama-4-scout-17b-16e-instruct';
-                              });
-                            },
-                          ),
-                          ActionChip(
-                            label: const Text('OpenRouter Free'),
-                            onPressed: () {
-                              setState(() {
-                                _engineMode = TranslationEngineMode.customApi;
-                                _endpointController.text =
-                                    'https://openrouter.ai/api/v1/chat/completions';
-                                _modelController.text =
-                                    'meta-llama/llama-3.3-70b-instruct:free';
-                                _fallbacksController.text =
-                                    'google/gemma-3-27b-it:free, mistralai/mistral-small-3.1-24b-instruct:free';
-                              });
-                            },
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: _endpointController,
-                        onChanged: (_) =>
-                            _engineMode = TranslationEngineMode.customApi,
-                        decoration: const InputDecoration(
-                          labelText: 'API Endpoint URL',
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: _modelController,
-                        decoration: const InputDecoration(
-                          labelText: 'Основная модель',
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: _fallbacksController,
-                        maxLines: 2,
-                        decoration: const InputDecoration(
-                          labelText: 'Резервные модели (через запятую)',
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
             ),
           ),
 
