@@ -263,7 +263,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     await _reloadAll();
   }
 
-  void _downloadFullBook(Book book) {
+  void _downloadFullBook(Book book, {bool forceRetranslate = false}) {
     final isOffline = _settings.engineMode == TranslationEngineMode.offlineLocal;
     if (!isOffline &&
         !_settings.hasAnyOnlineKey &&
@@ -283,15 +283,45 @@ class _LibraryScreenState extends State<LibraryScreen> {
       bookTitle: book.title,
       currentReadingChapter: 0,
       mode: TranslateMode.fullBook,
+      forceRetranslate: forceRetranslate,
       targetLanguage: _settings.targetLanguage,
     );
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Запущен фоновый перевод всей книги «${book.title}»'),
+        content: Text(
+          forceRetranslate
+              ? 'Запущен повторный перевод всей книги «${book.title}»'
+              : 'Запущен фоновый перевод всей книги «${book.title}»',
+        ),
         duration: const Duration(seconds: 2),
       ),
     );
+  }
+
+  Future<void> _confirmRetranslateFullBook(Book book) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Перевести всю книгу заново?'),
+        content: Text(
+          'Старый перевод книги «${book.title}» будет очищен и выполнен заново с самого начала.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Перевести заново'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      _downloadFullBook(book, forceRetranslate: true);
+    }
   }
 
   Future<void> _deleteBook(Book book) async {
@@ -565,23 +595,52 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     ),
                     onPressed: _queueController.stop,
                   )
-                else
+                else ...[
                   IconButton(
-                    tooltip: 'Скачать всю книгу',
+                    tooltip: 'Скачать / доперевести книгу',
                     icon: Icon(
                       Icons.cloud_download_outlined,
                       color: accent,
                     ),
                     onPressed: () => _downloadFullBook(book),
                   ),
-                IconButton(
-                  tooltip: 'Удалить книгу',
-                  icon: const Icon(
-                    Icons.delete_outline,
-                    color: Color(0xFFA89E93),
+                  PopupMenuButton<String>(
+                    icon: const Icon(
+                      Icons.more_vert,
+                      color: Color(0xFFA89E93),
+                    ),
+                    onSelected: (value) {
+                      if (value == 'retranslate') {
+                        _confirmRetranslateFullBook(book);
+                      } else if (value == 'delete') {
+                        _deleteBook(book);
+                      }
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(
+                        value: 'retranslate',
+                        child: Row(
+                          children: [
+                            Icon(Icons.refresh, size: 18),
+                            SizedBox(width: 8),
+                            Text('Перевести заново'),
+                          ],
+                        ),
+                      ),
+                      PopupMenuItem(
+                        value: 'delete',
+                        child: Row(
+                          children: [
+                            Icon(Icons.delete_outline,
+                                size: 18, color: Colors.redAccent),
+                            SizedBox(width: 8),
+                            Text('Удалить книгу'),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
-                  onPressed: () => _deleteBook(book),
-                ),
+                ],
               ],
             ),
           ),
