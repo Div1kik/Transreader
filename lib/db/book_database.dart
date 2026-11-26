@@ -272,6 +272,31 @@ class BookDatabase {
     );
   }
 
+  /// Сбрасывает существующий перевод для выбранных глав (или всей книги), чтобы перевести заново
+  Future<void> clearTranslationsForChapters(
+    String bookId,
+    List<int> chapterIndices,
+  ) async {
+    if (chapterIndices.isEmpty) return;
+    final db = await database;
+    await db.transaction((txn) async {
+      for (final chIdx in chapterIndices) {
+        await txn.update(
+          'paragraphs',
+          {'translatedText': null},
+          where: 'bookId = ? AND chapterIndex = ?',
+          whereArgs: [bookId, chIdx],
+        );
+        await txn.update(
+          'chapters',
+          {'status': ChapterStatus.pending.index},
+          where: 'bookId = ? AND chapterIndex = ?',
+          whereArgs: [bookId, chIdx],
+        );
+      }
+    });
+  }
+
   Future<void> deleteBook(String bookId) async {
     final db = await database;
     await db.transaction((txn) async {
