@@ -10,13 +10,39 @@ class Book {
   final String title;
   final String format;
   final int totalChapters;
+  final int lastChapterIndex;
+  final int lastPageIndex;
+  final double lastScrollOffset;
 
   const Book({
     required this.id,
     required this.title,
     required this.format,
     required this.totalChapters,
+    this.lastChapterIndex = 0,
+    this.lastPageIndex = 0,
+    this.lastScrollOffset = 0.0,
   });
+
+  Book copyWith({
+    String? id,
+    String? title,
+    String? format,
+    int? totalChapters,
+    int? lastChapterIndex,
+    int? lastPageIndex,
+    double? lastScrollOffset,
+  }) {
+    return Book(
+      id: id ?? this.id,
+      title: title ?? this.title,
+      format: format ?? this.format,
+      totalChapters: totalChapters ?? this.totalChapters,
+      lastChapterIndex: lastChapterIndex ?? this.lastChapterIndex,
+      lastPageIndex: lastPageIndex ?? this.lastPageIndex,
+      lastScrollOffset: lastScrollOffset ?? this.lastScrollOffset,
+    );
+  }
 
   Map<String, dynamic> toMap() {
     return {
@@ -24,6 +50,9 @@ class Book {
       'title': title,
       'format': format,
       'totalChapters': totalChapters,
+      'lastChapterIndex': lastChapterIndex,
+      'lastPageIndex': lastPageIndex,
+      'lastScrollOffset': lastScrollOffset,
     };
   }
 
@@ -33,6 +62,9 @@ class Book {
       title: map['title'] as String,
       format: map['format'] as String,
       totalChapters: map['totalChapters'] as int,
+      lastChapterIndex: (map['lastChapterIndex'] as int?) ?? 0,
+      lastPageIndex: (map['lastPageIndex'] as int?) ?? 0,
+      lastScrollOffset: ((map['lastScrollOffset'] as num?) ?? 0.0).toDouble(),
     );
   }
 }
