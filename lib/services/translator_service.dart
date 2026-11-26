@@ -23,7 +23,8 @@ class ModelRateLimitException implements Exception {
 
 class TranslatorService {
   TranslatorSettings settings;
-  final Map<String, DateTime> _routeCooldownUntil = {};
+  final Map<String, DateTime> _routeRateLimitedUntil = {};
+  final Map<String, DateTime> _routeErrorCooldownUntil = {};
 
   TranslatorService({required this.settings});
 
@@ -32,20 +33,35 @@ class TranslatorService {
 
   bool isRouteCoolingDown(ApiProviderProfile provider, String model) {
     final key = _routeKey(provider, model);
-    final until = _routeCooldownUntil[key];
-    if (until == null) return false;
-    if (DateTime.now().isAfter(until)) {
-      _routeCooldownUntil.remove(key);
-      return false;
+    final now = DateTime.now();
+
+    final rateUntil = _routeRateLimitedUntil[key];
+    if (rateUntil != null) {
+      if (now.isAfter(rateUntil)) {
+        _routeRateLimitedUntil.remove(key);
+      } else {
+        return true;
+      }
     }
-    return true;
+
+    final errUntil = _routeErrorCooldownUntil[key];
+    if (errUntil != null) {
+      if (now.isAfter(errUntil)) {
+        _routeErrorCooldownUntil.remove(key);
+      } else {
+        return true;
+      }
+    }
+
+    return false;
   }
 
-  int getShortestCooldownSeconds() {
-    if (_routeCooldownUntil.isEmpty) return 0;
+  /// Возвращает минимальное ожидание ТОЛЬКО если есть модели в реальном 429-лимите
+  int getShortestRateLimitSeconds() {
+    if (_routeRateLimitedUntil.isEmpty) return 0;
     final now = DateTime.now();
     int minSec = 999999;
-    for (final until in _routeCooldownUntil.values) {
+    for (final until in _routeRateLimitedUntil.values) {
       final diff = until.difference(now).inSeconds;
       if (diff > 0 && diff < minSec) {
         minSec = diff;
@@ -240,15 +256,20 @@ class TranslatorService {
           onModelSelected,
         );
       }
-      final waitSec = getShortestCooldownSeconds().clamp(3, 90);
-      throw ModelRateLimitException(
-        model: '${routes.first.provider.name}: ${routes.first.model}',
-        retryAfterSeconds: waitSec,
-        rawMessage: 'Все подключённые модели временно в лимите',
+      final waitSec = getShortestRateLimitSeconds();
+      if (waitSec > 0) {
+        throw ModelRateLimitException(
+          model: '${routes.first.provider.name}: ${routes.first.model}',
+          retryAfterSeconds: waitSec.clamp(3, 90),
+          rawMessage: 'Все подключённые модели временно в лимите',
+        );
+      }
+      throw Exception(
+        'Все провайдеры отклонили запрос (проверьте VPN или ключи в настройках)',
       );
     }
 
-    Exception? lastError;
+    final errorSummary = <String>[];
 
     for (final route in availableRoutes) {
       final badge = '${route.provider.name} • ${route.model}';
@@ -263,14 +284,17 @@ class TranslatorService {
           targetLanguage: targetLanguage,
         );
       } on ModelRateLimitException catch (rateErr) {
-        _routeCooldownUntil[_routeKey(route.provider, route.model)] =
+        _routeRateLimitedUntil[_routeKey(route.provider, route.model)] =
             DateTime.now().add(Duration(seconds: rateErr.retryAfterSeconds));
-        lastError = rateErr;
+        errorSummary.add('${route.provider.name}: 429 лимит');
         continue;
       } catch (e) {
-        _routeCooldownUntil[_routeKey(route.provider, route.model)] =
-            DateTime.now().add(const Duration(seconds: 25));
-        lastError = e is Exception ? e : Exception(e.toString());
+        final msg = e.toString().replaceFirst('Exception: ', '');
+        _routeErrorCooldownUntil[_routeKey(route.provider, route.model)] =
+            DateTime.now().add(const Duration(seconds: 20));
+        if (errorSummary.length < 3) {
+          errorSummary.add(msg);
+        }
         continue;
       }
     }
@@ -285,16 +309,21 @@ class TranslatorService {
       } catch (_) {}
     }
 
-    final waitSec = getShortestCooldownSeconds();
+    // Ждём квоту только если хотя бы одна модель реально ушла в 429 Rate Limit
+    final waitSec = getShortestRateLimitSeconds();
     if (waitSec > 0) {
       throw ModelRateLimitException(
         model: availableRoutes.first.model,
         retryAfterSeconds: waitSec.clamp(3, 90),
-        rawMessage: lastError?.toString() ?? 'Все модели достигли лимита',
+        rawMessage: errorSummary.join(' | '),
       );
     }
 
-    throw lastError ?? Exception('Ни одна из подключённых моделей не ответила');
+    throw Exception(
+      errorSummary.isNotEmpty
+          ? errorSummary.join(' | ')
+          : 'Ни одна из подключённых моделей не ответила',
+    );
   }
 
   Future<List<String>> _callRouteWithRetry({
@@ -319,7 +348,15 @@ class TranslatorService {
       } on ModelRateLimitException {
         rethrow;
       } catch (e) {
-        attemptError = e is Exception ? e : Exception(e.toString());
+        final text = e.toString();
+        // При 400/401/403 повторный запрос к той же модели бессмысленен — сразу идём к следующей модели
+        if (text.contains('(400)') ||
+            text.contains('(401)') ||
+            text.contains('(403)') ||
+            text.contains('(404)')) {
+          rethrow;
+        }
+        attemptError = e is Exception ? e : Exception(text);
         if (attempt < maxAttempts) {
           await Future.delayed(Duration(milliseconds: 700 * attempt));
         }
@@ -368,10 +405,10 @@ $contextBlock
 ${jsonEncode(numberedInput)}
 ''';
 
+    // Без response_format: json_object, так как Gemini OpenAI-compat и ряд моделей OpenRouter возвращают на него 400 Bad Request
     final body = jsonEncode({
       'model': model,
       'temperature': 0.25,
-      'response_format': {'type': 'json_object'},
       'messages': [
         {'role': 'system', 'content': systemPrompt},
         {'role': 'user', 'content': userPrompt},
@@ -416,8 +453,11 @@ ${jsonEncode(numberedInput)}
           rawMessage: 'API ${response.statusCode}',
         );
       }
+      final shortBody = response.body.length > 140
+          ? '${response.body.substring(0, 140)}...'
+          : response.body;
       throw Exception(
-        '${provider.name} (${response.statusCode}): ${response.body}',
+        '${provider.name} (${response.statusCode}): $shortBody',
       );
     }
 
@@ -443,7 +483,6 @@ ${jsonEncode(numberedInput)}
     for (int i = 0; i < translationsRaw.length; i++) {
       final tr = translationsRaw[i].toString().trim();
       final src = paragraphs[i].trim();
-      // Валидация качества: отбрасываем пустые строки и случаи, когда длинный английский абзац вернулся без перевода
       if (tr.isEmpty) {
         throw Exception('Модель $model вернула пустой перевод абзаца #$i');
       }
