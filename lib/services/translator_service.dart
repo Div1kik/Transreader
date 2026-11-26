@@ -221,7 +221,6 @@ class TranslatorService {
       );
     }
 
-    // Собираем все пары (Провайдер -> Модель) в порядке приоритета
     final routes = <({ApiProviderProfile provider, String model})>[];
     for (final p in providers) {
       for (final m in p.models) {
@@ -269,7 +268,6 @@ class TranslatorService {
         lastError = rateErr;
         continue;
       } catch (e) {
-        // При любой ошибке (403 Forbidden, 500, таймаут, сбой JSON) ставим связку на короткую паузу и идём к следующей модели/провайдеру
         _routeCooldownUntil[_routeKey(route.provider, route.model)] =
             DateTime.now().add(const Duration(seconds: 25));
         lastError = e is Exception ? e : Exception(e.toString());
@@ -277,7 +275,6 @@ class TranslatorService {
       }
     }
 
-    // Если все онлайн-провайдеры и модели выдали ошибку, но включён страховочный переход на офлайн-словарь
     if (settings.fallbackToOfflineOnError) {
       try {
         return await _translateWithOfflineMlKit(
@@ -342,7 +339,7 @@ class TranslatorService {
     final uri = Uri.parse(provider.endpointUrl);
 
     final contextBlock = previousContext.isEmpty
-        ? 'Нет предыдущего контекста (начало главы).'
+        ? 'Начало сцены / главы.'
         : previousContext.join('\n');
 
     final numberedInput = <String, String>{};
@@ -351,25 +348,29 @@ class TranslatorService {
     }
 
     final systemPrompt = '''
-Ты профессиональный художественный переводчик книг. Переводи текст на $targetLanguage язык.
-Правила:
-1. Сохраняй единый стиль, терминологию, имена собственные и пол персонажей, опираясь на контекст.
-2. Переводи строго каждый абзац из входного JSON-объекта, сохраняя то же количество ключей ("0", "1", ...).
-3. Не добавляй отсебятину, комментарии или пояснения.
-4. Ответь СТРОГО валидным JSON-объектом формата: {"translations": ["перевод 0", "перевод 1", ...]}.
+Ты опытный литературный переводчик художественной прозы и эпического фэнтези на $targetLanguage язык.
+Твоя задача — сделать живой, естественный, грамотный и точный художественный перевод, который читается как книга, написанная носителем языка.
+
+Строгие правила качества:
+1. Никакого подстрочника и дословной кальки английского синтаксиса: перестраивай фразы так, чтобы они звучали естественно по-русски, сохраняя смысл, атмосферу и ритм автора.
+2. Имена собственные, топонимы и названия кланов/орденов аккуратно транслитерируй в едином стиле и склоняй по правилам русского языка (например: Uthas -> Утас, Veradis -> Верадис, Corban -> Корбан, Benothi -> Беноти, Forn Forest -> лес Форн). Не переводи имена нарицательными словами!
+3. Следи за согласованием родов, падежей и местоимений, опираясь на контекст предыдущих абзацев.
+4. Прямую речь оформляй в соответствии с нормами русского языка («...» или тире).
+5. Переводи строго каждый абзац из входного JSON-объекта ("0", "1", ...), не пропуская предложения и не объединяя соседние абзацы.
+6. Ответь СТРОГО валидным JSON-объектом без markdown-обёрток и комментариев: {"translations": ["перевод 0", "перевод 1", ...]}.
 ''';
 
     final userPrompt = '''
-КОНТЕКСТ ПРЕДЫДУЩИХ АБЗАЦЕВ (только для понимания стиля и имён, не переводить повторно):
+ПРЕДЫДУЩИЙ КОНТЕКСТ СЦЕНЫ (оригинал для понимания сюжета, родов и имён — не включать в ответ):
 $contextBlock
 
-АБЗАЦЫ ДЛЯ ПЕРЕВОДА (ровно ${paragraphs.length} шт.):
+АБЗАЦЫ ДЛЯ ХУДОЖЕСТВЕННОГО ПЕРЕВОДА (ровно ${paragraphs.length} шт.):
 ${jsonEncode(numberedInput)}
 ''';
 
     final body = jsonEncode({
       'model': model,
-      'temperature': 0.3,
+      'temperature': 0.25,
       'response_format': {'type': 'json_object'},
       'messages': [
         {'role': 'system', 'content': systemPrompt},
@@ -390,7 +391,7 @@ ${jsonEncode(numberedInput)}
           },
           body: body,
         )
-        .timeout(const Duration(seconds: 55));
+        .timeout(const Duration(seconds: 60));
 
     if (response.statusCode == 429) {
       final retryHeader = response.headers['retry-after'];
@@ -438,7 +439,23 @@ ${jsonEncode(numberedInput)}
       );
     }
 
-    return translationsRaw.map((e) => e.toString().trim()).toList();
+    final result = <String>[];
+    for (int i = 0; i < translationsRaw.length; i++) {
+      final tr = translationsRaw[i].toString().trim();
+      final src = paragraphs[i].trim();
+      // Валидация качества: отбрасываем пустые строки и случаи, когда длинный английский абзац вернулся без перевода
+      if (tr.isEmpty) {
+        throw Exception('Модель $model вернула пустой перевод абзаца #$i');
+      }
+      if (targetLanguage.toLowerCase().contains('russian') &&
+          src.length > 25 &&
+          !_isCyrillic(tr)) {
+        throw Exception('Модель $model не перевела абзац #$i на русский язык');
+      }
+      result.add(tr);
+    }
+
+    return result;
   }
 
   String _extractJsonObject(String raw) {
