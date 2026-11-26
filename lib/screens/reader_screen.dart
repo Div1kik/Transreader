@@ -153,9 +153,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
     await _refreshChaptersList();
 
     final freshBook = await BookDatabase.instance.getBookById(widget.book.id);
-    final startChapter = freshBook?.lastChapterIndex ?? widget.book.lastChapterIndex;
+    final startChapter =
+        freshBook?.lastChapterIndex ?? widget.book.lastChapterIndex;
     final startPage = freshBook?.lastPageIndex ?? widget.book.lastPageIndex;
-    final startScroll = freshBook?.lastScrollOffset ?? widget.book.lastScrollOffset;
+    final startScroll =
+        freshBook?.lastScrollOffset ?? widget.book.lastScrollOffset;
 
     await _loadChapter(
       startChapter,
@@ -250,7 +252,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
     });
   }
 
-  void _startQueue({TranslateMode? overrideMode, int? overrideAhead}) {
+  void _startQueue({
+    TranslateMode? overrideMode,
+    int? overrideAhead,
+    bool forceRetranslate = false,
+  }) {
     final parsedAhead = int.tryParse(_chaptersAheadController.text.trim());
     final effectiveAhead =
         (overrideAhead ?? parsedAhead ?? _chaptersAhead).clamp(1, 500);
@@ -267,8 +273,41 @@ class _ReaderScreenState extends State<ReaderScreen> {
       mode: overrideMode ?? _selectedMode,
       chaptersAhead: effectiveAhead,
       specificChapterIndex: _specificChapterIndex,
+      forceRetranslate: forceRetranslate,
       targetLanguage: _settings.targetLanguage,
     );
+  }
+
+  Future<void> _confirmAndRetranslate() async {
+    final scopeText = _selectedMode == TranslateMode.fullBook
+        ? 'всей книги'
+        : _selectedMode == TranslateMode.specificChapter
+            ? 'главы №${_specificChapterIndex + 1}'
+            : 'ближайших ${_chaptersAheadController.text} глав (начиная с текущей)';
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Перевести повторно?'),
+        content: Text(
+          'Старый перевод для $scopeText будет удалён и выполнен заново выбранным движком.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Перевести заново'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true && mounted) {
+      _startQueue(forceRetranslate: true);
+    }
   }
 
   Future<String> _lookupWordInContext({
@@ -1095,7 +1134,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
             style: TextStyle(color: palette.text, fontSize: 17),
           ),
           actions: [
-            // Быстрый переключатель движка: ИИ / Офлайн прямо в шапке читалки
             Padding(
               padding: const EdgeInsets.only(right: 4),
               child: ActionChip(
@@ -1197,9 +1235,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
                               ),
                             ),
                             if (_selectedMode == TranslateMode.nextChapters) ...[
-                              const SizedBox(width: 8),
+                              const SizedBox(width: 6),
                               SizedBox(
-                                width: 64,
+                                width: 54,
                                 height: 38,
                                 child: TextField(
                                   controller: _chaptersAheadController,
@@ -1216,7 +1254,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                                   ),
                                   decoration: InputDecoration(
                                     contentPadding: const EdgeInsets.symmetric(
-                                      horizontal: 6,
+                                      horizontal: 4,
                                       vertical: 4,
                                     ),
                                     hintText: '3',
@@ -1229,7 +1267,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                             ] else if (_selectedMode ==
                                     TranslateMode.specificChapter &&
                                 _chapters.isNotEmpty) ...[
-                              const SizedBox(width: 8),
+                              const SizedBox(width: 6),
                               Expanded(
                                 child: DropdownButton<int>(
                                   isExpanded: true,
@@ -1265,19 +1303,26 @@ class _ReaderScreenState extends State<ReaderScreen> {
                                 ),
                               ),
                             ],
-                            const SizedBox(width: 8),
-                            p.isRunning
-                                ? FilledButton.tonalIcon(
-                                    onPressed: widget.queueController.stop,
-                                    icon: const Icon(Icons.stop, size: 18),
-                                    label: const Text('Стоп'),
-                                  )
-                                : FilledButton.icon(
-                                    onPressed: () => _startQueue(),
-                                    icon:
-                                        const Icon(Icons.play_arrow, size: 18),
-                                    label: const Text('Старт'),
-                                  ),
+                            const SizedBox(width: 6),
+                            if (p.isRunning)
+                              FilledButton.tonalIcon(
+                                onPressed: widget.queueController.stop,
+                                icon: const Icon(Icons.stop, size: 18),
+                                label: const Text('Стоп'),
+                              )
+                            else ...[
+                              FilledButton.icon(
+                                onPressed: () => _startQueue(),
+                                icon: const Icon(Icons.play_arrow, size: 18),
+                                label: const Text('Старт'),
+                              ),
+                              const SizedBox(width: 4),
+                              IconButton.outlined(
+                                tooltip: 'Перевести повторно (перезаписать)',
+                                icon: const Icon(Icons.refresh, size: 20),
+                                onPressed: _confirmAndRetranslate,
+                              ),
+                            ],
                           ],
                         ),
                         if (p.isRunning ||
