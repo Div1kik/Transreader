@@ -39,7 +39,6 @@ class _SettingsScreenState extends State<SettingsScreen>
   late bool _fallbackToOfflineOnError;
   late TextEditingController _langController;
 
-  // Три полностью независимых контроллера для каждого провайдера — исключает перезапись друг друга
   late TextEditingController _groqKeyCtrl;
   late TextEditingController _groqModelsCtrl;
   bool _groqEnabled = true;
@@ -55,7 +54,6 @@ class _SettingsScreenState extends State<SettingsScreen>
   bool _openRouterEnabled = true;
   bool _obscureOpenRouter = true;
 
-  // Дополнительные пользовательские провайдеры (если нужно добавить что-то ещё)
   late List<ApiProviderProfile> _extraProviders;
 
   bool _downloadingOfflineModel = false;
@@ -81,10 +79,8 @@ class _SettingsScreenState extends State<SettingsScreen>
     'meta-llama/llama-4-scout-17b-16e-instruct',
   ];
 
-  static const List<String> _defaultGeminiModels = [
-    'gemini-2.5-flash',
-    'gemini-2.0-flash',
-  ];
+  static const List<String> _defaultGeminiModels =
+      SettingsService.defaultGeminiModels;
 
   static const List<String> _defaultOpenRouterModels = [
     'meta-llama/llama-3.3-70b-instruct:free',
@@ -389,7 +385,8 @@ class _SettingsScreenState extends State<SettingsScreen>
                     TextField(
                       controller: endpointCtrl,
                       decoration: const InputDecoration(
-                        labelText: 'Endpoint URL (https://.../v1/chat/completions)',
+                        labelText:
+                            'Endpoint URL (https://.../v1/chat/completions)',
                         border: OutlineInputBorder(),
                       ),
                     ),
@@ -882,7 +879,6 @@ class _SettingsScreenState extends State<SettingsScreen>
 
                   const SizedBox(height: 16),
 
-                  // 1. Groq (отдельная ячейка)
                   _buildDedicatedProviderBox(
                     accent: accent,
                     orderNumber: 1,
@@ -898,7 +894,6 @@ class _SettingsScreenState extends State<SettingsScreen>
                         setState(() => _obscureGroq = !_obscureGroq),
                   ),
 
-                  // 2. Google Gemini (отдельная ячейка)
                   _buildDedicatedProviderBox(
                     accent: accent,
                     orderNumber: 2,
@@ -914,7 +909,6 @@ class _SettingsScreenState extends State<SettingsScreen>
                         setState(() => _obscureGemini = !_obscureGemini),
                   ),
 
-                  // 3. OpenRouter (отдельная ячейка)
                   _buildDedicatedProviderBox(
                     accent: accent,
                     orderNumber: 3,
@@ -931,7 +925,6 @@ class _SettingsScreenState extends State<SettingsScreen>
                         setState(() => _obscureOpenRouter = !_obscureOpenRouter),
                   ),
 
-                  // Дополнительные провайдеры (если добавлены пользователем)
                   for (int i = 0; i < _extraProviders.length; i++)
                     Container(
                       margin: const EdgeInsets.only(bottom: 8),
