@@ -126,7 +126,6 @@ class TranslatorSettings {
       }
     }
 
-    // Если список профилей пуст, собираем профиль из основных полей (обратная совместимость)
     if (result.isEmpty && apiKey.trim().isNotEmpty) {
       final models = activeModelPool;
       if (models.isNotEmpty) {
@@ -186,6 +185,22 @@ class SettingsService {
   static const _kFallbackOffline = 'translator_fallback_offline_on_err';
   static const _kLang = 'translator_target_lang';
 
+  static const List<String> defaultGeminiModels = [
+    'gemini-4-hydrogen',
+    'gemini-3.8-flash',
+    'gemini-3.5-flash-lite',
+  ];
+
+  static const Set<String> _deprecatedGeminiModels = {
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
+    'gemini-2.5-pro',
+    'gemini-2.0-flash',
+    'gemini-2.0-flash-lite',
+    'gemini-1.5-flash',
+    'gemini-1.5-pro',
+  };
+
   Future<TranslatorSettings> loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
     final modeIdx =
@@ -212,24 +227,31 @@ class SettingsService {
         ];
 
     List<ApiProviderProfile> loadedProviders = [];
+    bool needsResave = false;
     final rawProviders = prefs.getString(_kProvidersJson);
     if (rawProviders != null && rawProviders.isNotEmpty) {
       try {
         final decoded = jsonDecode(rawProviders);
         if (decoded is List) {
-          loadedProviders = decoded
-              .whereType()
-              .map(
-                (m) => ApiProviderProfile.fromMap(
-                  Map<String, dynamic>.from(m),
-                ),
-              )
-              .toList();
+          loadedProviders = decoded.whereType().map((m) {
+            var profile =
+                ApiProviderProfile.fromMap(Map<String, dynamic>.from(m));
+            // Автообновление закрытых моделей Gemini на актуальные в уже сохранённых настройках
+            if (profile.endpointUrl
+                .contains('generativelanguage.googleapis.com')) {
+              final hasDeprecated = profile.models
+                  .any((mdl) => _deprecatedGeminiModels.contains(mdl));
+              if (hasDeprecated || profile.models.isEmpty) {
+                profile = profile.copyWith(models: defaultGeminiModels);
+                needsResave = true;
+              }
+            }
+            return profile;
+          }).toList();
         }
       } catch (_) {}
     }
 
-    // Автомиграция: если профилей ещё не было, но ключ Groq уже сохранён — создаём первый профиль
     if (loadedProviders.isEmpty && savedApiKey.trim().isNotEmpty) {
       final initialModels = <String>[
         effectiveModel,
@@ -247,9 +269,10 @@ class SettingsService {
           enabled: true,
         ),
       ];
+      needsResave = true;
     }
 
-    return TranslatorSettings(
+    final settings = TranslatorSettings(
       engineMode: TranslationEngineMode
           .values[modeIdx.clamp(0, TranslationEngineMode.values.length - 1)],
       endpointUrl: effectiveEndpoint,
@@ -260,6 +283,12 @@ class SettingsService {
       fallbackToOfflineOnError: prefs.getBool(_kFallbackOffline) ?? false,
       targetLanguage: prefs.getString(_kLang) ?? 'Russian',
     );
+
+    if (needsResave) {
+      await saveSettings(settings);
+    }
+
+    return settings;
   }
 
   Future<void> saveSettings(TranslatorSettings settings) async {
