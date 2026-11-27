@@ -7,13 +7,13 @@ import '../services/offline_translator_service.dart';
 import '../services/settings_service.dart';
 
 class _ProviderWizardStep {
-  final String idPrefix;
+  final String fixedId;
   final String title;
   final String url;
   final String keyPrefixHint;
 
   const _ProviderWizardStep({
-    required this.idPrefix,
+    required this.fixedId,
     required this.title,
     required this.url,
     required this.keyPrefixHint,
@@ -36,9 +36,27 @@ class _SettingsScreenState extends State<SettingsScreen>
     with WidgetsBindingObserver {
   final SettingsService _settingsService = SettingsService();
   late TranslationEngineMode _engineMode;
-  late List<ApiProviderProfile> _providers;
   late bool _fallbackToOfflineOnError;
   late TextEditingController _langController;
+
+  // Три полностью независимых контроллера для каждого провайдера — исключает перезапись друг друга
+  late TextEditingController _groqKeyCtrl;
+  late TextEditingController _groqModelsCtrl;
+  bool _groqEnabled = true;
+  bool _obscureGroq = true;
+
+  late TextEditingController _geminiKeyCtrl;
+  late TextEditingController _geminiModelsCtrl;
+  bool _geminiEnabled = true;
+  bool _obscureGemini = true;
+
+  late TextEditingController _openRouterKeyCtrl;
+  late TextEditingController _openRouterModelsCtrl;
+  bool _openRouterEnabled = true;
+  bool _obscureOpenRouter = true;
+
+  // Дополнительные пользовательские провайдеры (если нужно добавить что-то ещё)
+  late List<ApiProviderProfile> _extraProviders;
 
   bool _downloadingOfflineModel = false;
   String? _offlineStatusStep;
@@ -49,21 +67,46 @@ class _SettingsScreenState extends State<SettingsScreen>
   bool _wizardActive = false;
   int _wizardStepIndex = 0;
 
+  static const String _groqEndpoint =
+      'https://api.groq.com/openai/v1/chat/completions';
+  static const String _geminiEndpoint =
+      'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+  static const String _openRouterEndpoint =
+      'https://openrouter.ai/api/v1/chat/completions';
+
+  static const List<String> _defaultGroqModels = [
+    'llama-3.3-70b-versatile',
+    'openai/gpt-oss-120b',
+    'openai/gpt-oss-20b',
+    'meta-llama/llama-4-scout-17b-16e-instruct',
+  ];
+
+  static const List<String> _defaultGeminiModels = [
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+  ];
+
+  static const List<String> _defaultOpenRouterModels = [
+    'meta-llama/llama-3.3-70b-instruct:free',
+    'google/gemma-3-27b-it:free',
+    'mistralai/mistral-small-3.1-24b-instruct:free',
+  ];
+
   static const List<_ProviderWizardStep> _wizardSteps = [
     _ProviderWizardStep(
-      idPrefix: 'groq',
+      fixedId: 'groq_fixed',
       title: 'Groq Free (самый быстрый)',
       url: 'https://console.groq.com/keys',
       keyPrefixHint: 'gsk_...',
     ),
     _ProviderWizardStep(
-      idPrefix: 'gemini',
+      fixedId: 'gemini_fixed',
       title: 'Google Gemini Free (через ваш Google)',
       url: 'https://aistudio.google.com/app/apikey',
       keyPrefixHint: 'AIza...',
     ),
     _ProviderWizardStep(
-      idPrefix: 'openrouter',
+      fixedId: 'openrouter_fixed',
       title: 'OpenRouter Free (резервный пул)',
       url: 'https://openrouter.ai/settings/keys',
       keyPrefixHint: 'sk-or-...',
@@ -75,13 +118,55 @@ class _SettingsScreenState extends State<SettingsScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _engineMode = widget.initialSettings.engineMode;
-    _providers = List<ApiProviderProfile>.from(
-      widget.initialSettings.effectiveProviders,
-    );
     _fallbackToOfflineOnError =
         widget.initialSettings.fallbackToOfflineOnError;
     _langController =
         TextEditingController(text: widget.initialSettings.targetLanguage);
+
+    final existing = widget.initialSettings.effectiveProviders;
+
+    final groqP = existing
+        .where((p) => p.endpointUrl.contains('groq.com'))
+        .firstOrNull;
+    _groqKeyCtrl = TextEditingController(text: groqP?.apiKey ?? '');
+    _groqModelsCtrl = TextEditingController(
+      text: (groqP != null && groqP.models.isNotEmpty
+              ? groqP.models
+              : _defaultGroqModels)
+          .join(', '),
+    );
+    _groqEnabled = groqP?.enabled ?? true;
+
+    final geminiP = existing
+        .where((p) => p.endpointUrl.contains('generativelanguage.googleapis.com'))
+        .firstOrNull;
+    _geminiKeyCtrl = TextEditingController(text: geminiP?.apiKey ?? '');
+    _geminiModelsCtrl = TextEditingController(
+      text: (geminiP != null && geminiP.models.isNotEmpty
+              ? geminiP.models
+              : _defaultGeminiModels)
+          .join(', '),
+    );
+    _geminiEnabled = geminiP?.enabled ?? true;
+
+    final orP = existing
+        .where((p) => p.endpointUrl.contains('openrouter.ai'))
+        .firstOrNull;
+    _openRouterKeyCtrl = TextEditingController(text: orP?.apiKey ?? '');
+    _openRouterModelsCtrl = TextEditingController(
+      text: (orP != null && orP.models.isNotEmpty
+              ? orP.models
+              : _defaultOpenRouterModels)
+          .join(', '),
+    );
+    _openRouterEnabled = orP?.enabled ?? true;
+
+    _extraProviders = existing
+        .where((p) =>
+            !p.endpointUrl.contains('groq.com') &&
+            !p.endpointUrl.contains('generativelanguage.googleapis.com') &&
+            !p.endpointUrl.contains('openrouter.ai'))
+        .toList();
 
     _checkOfflineModel();
   }
@@ -172,7 +257,6 @@ class _SettingsScreenState extends State<SettingsScreen>
     }
   }
 
-  /// Подключение 1 модели в 1 клик (Groq)
   Future<void> _startSingleOneClickConnect() async {
     setState(() {
       _wizardActive = false;
@@ -181,7 +265,6 @@ class _SettingsScreenState extends State<SettingsScreen>
     await _launchProviderTab('https://console.groq.com/keys');
   }
 
-  /// Подключение сразу нескольких моделей пошагово (Groq -> Gemini -> OpenRouter)
   Future<void> _startMultiModelConnectWizard() async {
     setState(() {
       _wizardActive = true;
@@ -190,92 +273,55 @@ class _SettingsScreenState extends State<SettingsScreen>
     await _launchProviderTab(_wizardSteps.first.url);
   }
 
-  /// Автоматически определяет провайдера по формату ключа в буфере обмена (gsk_, AIza, sk-or-)
   Future<String?> _tryAutoDetectAndAddKeyFromClipboard({
     bool silentIfNotFound = false,
   }) async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final clipText = data?.text?.trim() ?? '';
 
-    ApiProviderProfile? detectedProfile;
-    String matchHost = '';
+    String? detectedName;
 
     if (clipText.startsWith('gsk_') && clipText.length > 20) {
-      matchHost = 'groq.com';
-      detectedProfile = ApiProviderProfile(
-        id: 'groq_${DateTime.now().millisecondsSinceEpoch}',
-        name: 'Groq Free',
-        endpointUrl: 'https://api.groq.com/openai/v1/chat/completions',
-        apiKey: clipText,
-        models: const [
-          'llama-3.3-70b-versatile',
-          'openai/gpt-oss-120b',
-          'openai/gpt-oss-20b',
-          'meta-llama/llama-4-scout-17b-16e-instruct',
-        ],
-        enabled: true,
-      );
+      detectedName = 'Groq Free';
+      if (mounted) {
+        setState(() {
+          _engineMode = TranslationEngineMode.groqCloud;
+          _groqKeyCtrl.text = clipText;
+          _groqEnabled = true;
+        });
+      }
     } else if (clipText.startsWith('AIza') && clipText.length > 25) {
-      matchHost = 'generativelanguage.googleapis.com';
-      detectedProfile = ApiProviderProfile(
-        id: 'gemini_${DateTime.now().millisecondsSinceEpoch}',
-        name: 'Google Gemini Free',
-        endpointUrl:
-            'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
-        apiKey: clipText,
-        models: const [
-          'gemini-2.5-flash',
-          'gemini-2.0-flash',
-        ],
-        enabled: true,
-      );
+      detectedName = 'Google Gemini Free';
+      if (mounted) {
+        setState(() {
+          _engineMode = TranslationEngineMode.groqCloud;
+          _geminiKeyCtrl.text = clipText;
+          _geminiEnabled = true;
+        });
+      }
     } else if (clipText.startsWith('sk-or-') && clipText.length > 20) {
-      matchHost = 'openrouter.ai';
-      detectedProfile = ApiProviderProfile(
-        id: 'openrouter_${DateTime.now().millisecondsSinceEpoch}',
-        name: 'OpenRouter Free',
-        endpointUrl: 'https://openrouter.ai/api/v1/chat/completions',
-        apiKey: clipText,
-        models: const [
-          'meta-llama/llama-3.3-70b-instruct:free',
-          'google/gemma-3-27b-it:free',
-          'mistralai/mistral-small-3.1-24b-instruct:free',
-        ],
-        enabled: true,
-      );
+      detectedName = 'OpenRouter Free';
+      if (mounted) {
+        setState(() {
+          _engineMode = TranslationEngineMode.groqCloud;
+          _openRouterKeyCtrl.text = clipText;
+          _openRouterEnabled = true;
+        });
+      }
     }
 
-    if (detectedProfile != null) {
-      if (!mounted) return null;
-      setState(() {
-        _engineMode = TranslationEngineMode.groqCloud;
-        final existingIdx = _providers.indexWhere(
-          (p) => p.endpointUrl.contains(matchHost),
-        );
-        if (existingIdx >= 0) {
-          _providers[existingIdx] = detectedProfile!.copyWith(
-            id: _providers[existingIdx].id,
-            models: _providers[existingIdx].models.isNotEmpty
-                ? _providers[existingIdx].models
-                : detectedProfile.models,
-          );
-        } else {
-          _providers.add(detectedProfile!);
-        }
-      });
-
+    if (detectedName != null) {
       await _persistSettingsSilently();
-
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Ключ ${detectedProfile.name} распознан и автоматически подключён!',
+              'Ключ $detectedName распознан и вставлен в своё поле!',
             ),
           ),
         );
       }
-      return detectedProfile.name;
+      return detectedName;
     } else if (!silentIfNotFound && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -288,18 +334,16 @@ class _SettingsScreenState extends State<SettingsScreen>
     return null;
   }
 
-  void _openProviderEditor({ApiProviderProfile? existing, int? index}) {
+  void _openExtraProviderEditor({ApiProviderProfile? existing, int? index}) {
     final nameCtrl = TextEditingController(
-      text: existing?.name ?? 'Groq / Gemini / OpenRouter',
+      text: existing?.name ?? 'Дополнительный API',
     );
     final endpointCtrl = TextEditingController(
-      text: existing?.endpointUrl ??
-          'https://api.groq.com/openai/v1/chat/completions',
+      text: existing?.endpointUrl ?? '',
     );
     final keyCtrl = TextEditingController(text: existing?.apiKey ?? '');
     final modelsCtrl = TextEditingController(
-      text: existing?.models.join(', ') ??
-          'llama-3.3-70b-versatile, openai/gpt-oss-120b',
+      text: existing?.models.join(', ') ?? '',
     );
     bool obscure = true;
 
@@ -326,54 +370,12 @@ class _SettingsScreenState extends State<SettingsScreen>
                   children: [
                     Text(
                       existing == null
-                          ? 'Добавить ИИ-провайдера'
+                          ? 'Добавить свой OpenAI-совместимый API'
                           : 'Настройка провайдера',
                       style: const TextStyle(
                         fontSize: 17,
                         fontWeight: FontWeight.bold,
                       ),
-                    ),
-                    const SizedBox(height: 10),
-                    Wrap(
-                      spacing: 8,
-                      children: [
-                        ActionChip(
-                          label: const Text('Groq Free'),
-                          onPressed: () {
-                            setModalState(() {
-                              nameCtrl.text = 'Groq Free';
-                              endpointCtrl.text =
-                                  'https://api.groq.com/openai/v1/chat/completions';
-                              modelsCtrl.text =
-                                  'llama-3.3-70b-versatile, openai/gpt-oss-120b, openai/gpt-oss-20b, meta-llama/llama-4-scout-17b-16e-instruct';
-                            });
-                          },
-                        ),
-                        ActionChip(
-                          label: const Text('Google Gemini'),
-                          onPressed: () {
-                            setModalState(() {
-                              nameCtrl.text = 'Google Gemini Free';
-                              endpointCtrl.text =
-                                  'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
-                              modelsCtrl.text =
-                                  'gemini-2.5-flash, gemini-2.0-flash';
-                            });
-                          },
-                        ),
-                        ActionChip(
-                          label: const Text('OpenRouter Free'),
-                          onPressed: () {
-                            setModalState(() {
-                              nameCtrl.text = 'OpenRouter Free';
-                              endpointCtrl.text =
-                                  'https://openrouter.ai/api/v1/chat/completions';
-                              modelsCtrl.text =
-                                  'meta-llama/llama-3.3-70b-instruct:free, google/gemma-3-27b-it:free, mistralai/mistral-small-3.1-24b-instruct:free';
-                            });
-                          },
-                        ),
-                      ],
                     ),
                     const SizedBox(height: 12),
                     TextField(
@@ -387,7 +389,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                     TextField(
                       controller: endpointCtrl,
                       decoration: const InputDecoration(
-                        labelText: 'Endpoint URL',
+                        labelText: 'Endpoint URL (https://.../v1/chat/completions)',
                         border: OutlineInputBorder(),
                       ),
                     ),
@@ -412,7 +414,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                       controller: modelsCtrl,
                       maxLines: 2,
                       decoration: const InputDecoration(
-                        labelText: 'Модели через запятую (в порядке приоритета)',
+                        labelText: 'Модели через запятую',
                         border: OutlineInputBorder(),
                       ),
                     ),
@@ -424,14 +426,16 @@ class _SettingsScreenState extends State<SettingsScreen>
                             .map((e) => e.trim())
                             .where((e) => e.isNotEmpty)
                             .toList();
-                        if (keyCtrl.text.trim().isEmpty || modelsList.isEmpty) {
+                        if (keyCtrl.text.trim().isEmpty ||
+                            endpointCtrl.text.trim().isEmpty ||
+                            modelsList.isEmpty) {
                           return;
                         }
                         final profile = ApiProviderProfile(
                           id: existing?.id ??
-                              DateTime.now().microsecondsSinceEpoch.toString(),
+                              'extra_${DateTime.now().microsecondsSinceEpoch}',
                           name: nameCtrl.text.trim().isEmpty
-                              ? 'API Провайдер'
+                              ? 'Свой API'
                               : nameCtrl.text.trim(),
                           endpointUrl: endpointCtrl.text.trim(),
                           apiKey: keyCtrl.text.trim(),
@@ -441,9 +445,9 @@ class _SettingsScreenState extends State<SettingsScreen>
                         setState(() {
                           _engineMode = TranslationEngineMode.groqCloud;
                           if (index != null) {
-                            _providers[index] = profile;
+                            _extraProviders[index] = profile;
                           } else {
-                            _providers.add(profile);
+                            _extraProviders.add(profile);
                           }
                         });
                         Navigator.of(ctx).pop();
@@ -459,6 +463,62 @@ class _SettingsScreenState extends State<SettingsScreen>
         );
       },
     );
+  }
+
+  List<String> _parseModels(String raw, List<String> fallback) {
+    final parsed = raw
+        .split(',')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    return parsed.isNotEmpty ? parsed : fallback;
+  }
+
+  List<ApiProviderProfile> _collectAllProviders() {
+    final list = <ApiProviderProfile>[];
+
+    if (_groqKeyCtrl.text.trim().isNotEmpty) {
+      list.add(
+        ApiProviderProfile(
+          id: 'groq_fixed',
+          name: 'Groq Free',
+          endpointUrl: _groqEndpoint,
+          apiKey: _groqKeyCtrl.text.trim(),
+          models: _parseModels(_groqModelsCtrl.text, _defaultGroqModels),
+          enabled: _groqEnabled,
+        ),
+      );
+    }
+
+    if (_geminiKeyCtrl.text.trim().isNotEmpty) {
+      list.add(
+        ApiProviderProfile(
+          id: 'gemini_fixed',
+          name: 'Google Gemini Free',
+          endpointUrl: _geminiEndpoint,
+          apiKey: _geminiKeyCtrl.text.trim(),
+          models: _parseModels(_geminiModelsCtrl.text, _defaultGeminiModels),
+          enabled: _geminiEnabled,
+        ),
+      );
+    }
+
+    if (_openRouterKeyCtrl.text.trim().isNotEmpty) {
+      list.add(
+        ApiProviderProfile(
+          id: 'openrouter_fixed',
+          name: 'OpenRouter Free',
+          endpointUrl: _openRouterEndpoint,
+          apiKey: _openRouterKeyCtrl.text.trim(),
+          models:
+              _parseModels(_openRouterModelsCtrl.text, _defaultOpenRouterModels),
+          enabled: _openRouterEnabled,
+        ),
+      );
+    }
+
+    list.addAll(_extraProviders);
+    return list;
   }
 
   Future<void> _checkOfflineModel() async {
@@ -558,23 +618,19 @@ class _SettingsScreenState extends State<SettingsScreen>
   }
 
   TranslatorSettings _buildUpdatedSettings() {
-    final activeFirst = _providers.where((p) => p.enabled).firstOrNull ??
-        (_providers.isNotEmpty ? _providers.first : null);
+    final collected = _collectAllProviders();
+    final activeFirst = collected.where((p) => p.enabled).firstOrNull ??
+        (collected.isNotEmpty ? collected.first : null);
 
     return TranslatorSettings(
       engineMode: _engineMode,
-      endpointUrl: activeFirst?.endpointUrl ??
-          'https://api.groq.com/openai/v1/chat/completions',
+      endpointUrl: activeFirst?.endpointUrl ?? _groqEndpoint,
       apiKey: activeFirst?.apiKey ?? '',
       model: activeFirst?.models.firstOrNull ?? 'llama-3.3-70b-versatile',
       fallbackModels: activeFirst != null && activeFirst.models.length > 1
           ? activeFirst.models.sublist(1)
-          : const [
-              'openai/gpt-oss-120b',
-              'openai/gpt-oss-20b',
-              'meta-llama/llama-4-scout-17b-16e-instruct',
-            ],
-      providers: _providers,
+          : _defaultGroqModels.sublist(1),
+      providers: collected,
       fallbackToOfflineOnError: _fallbackToOfflineOnError,
       targetLanguage: _langController.text.trim().isEmpty
           ? 'Russian'
@@ -598,7 +654,142 @@ class _SettingsScreenState extends State<SettingsScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _langController.dispose();
+    _groqKeyCtrl.dispose();
+    _groqModelsCtrl.dispose();
+    _geminiKeyCtrl.dispose();
+    _geminiModelsCtrl.dispose();
+    _openRouterKeyCtrl.dispose();
+    _openRouterModelsCtrl.dispose();
     super.dispose();
+  }
+
+  Widget _buildDedicatedProviderBox({
+    required Color accent,
+    required int orderNumber,
+    required String title,
+    required String keyHint,
+    required String portalUrl,
+    required TextEditingController keyController,
+    required TextEditingController modelsController,
+    required bool enabled,
+    required ValueChanged<bool> onToggleEnabled,
+    required bool obscureKey,
+    required VoidCallback onToggleObscure,
+  }) {
+    final hasKey = keyController.text.trim().isNotEmpty;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF191613),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: (hasKey && enabled)
+              ? accent.withOpacity(0.45)
+              : Colors.white12,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              CircleAvatar(
+                radius: 11,
+                backgroundColor: accent.withOpacity(0.2),
+                child: Text(
+                  '$orderNumber',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: accent,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Открыть сайт для получения ключа',
+                icon: Icon(Icons.open_in_new, size: 18, color: accent),
+                onPressed: () {
+                  _wizardActive = false;
+                  _launchProviderTab(portalUrl);
+                },
+              ),
+              Switch(
+                activeColor: accent,
+                value: enabled,
+                onChanged: onToggleEnabled,
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          TextField(
+            controller: keyController,
+            obscureText: obscureKey,
+            onChanged: (_) {
+              if (keyController.text.trim().isNotEmpty) {
+                _engineMode = TranslationEngineMode.groqCloud;
+              }
+              setState(() {});
+            },
+            decoration: InputDecoration(
+              labelText: 'API Key ($keyHint)',
+              hintText: keyHint,
+              isDense: true,
+              border: const OutlineInputBorder(),
+              suffixIcon: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    tooltip: 'Вставить из буфера',
+                    icon: const Icon(Icons.content_paste, size: 18),
+                    onPressed: () async {
+                      final data =
+                          await Clipboard.getData(Clipboard.kTextPlain);
+                      final txt = data?.text?.trim() ?? '';
+                      if (txt.isNotEmpty) {
+                        setState(() {
+                          keyController.text = txt;
+                          _engineMode = TranslationEngineMode.groqCloud;
+                        });
+                      }
+                    },
+                  ),
+                  IconButton(
+                    icon: Icon(
+                      obscureKey ? Icons.visibility : Icons.visibility_off,
+                      size: 18,
+                    ),
+                    onPressed: onToggleObscure,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: modelsController,
+            maxLines: 2,
+            style: const TextStyle(fontSize: 12),
+            decoration: const InputDecoration(
+              labelText: 'Модели (через запятую)',
+              isDense: true,
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -621,7 +812,6 @@ class _SettingsScreenState extends State<SettingsScreen>
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          // БЛОК 1: Быстрое подключение 1 модели или сразу нескольких моделей
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -645,12 +835,11 @@ class _SettingsScreenState extends State<SettingsScreen>
                   ),
                   const SizedBox(height: 6),
                   const Text(
-                    'Скопируйте ключ во вкладке браузера и нажмите крестик «✕» сверху — приложение само распознает ключ (Groq, Gemini или OpenRouter) и настроит автопереключение при сбоях.',
+                    'Каждый провайдер имеет своё отдельное поле для ключа. При ошибке или лимите одного провайдера переводчик сам переключится на следующий.',
                     style: TextStyle(fontSize: 13, color: Color(0xFFA89E93)),
                   ),
                   const SizedBox(height: 14),
 
-                  // Две главные кнопки: 1 модель в 1 клик + сразу несколько моделей
                   Row(
                     children: [
                       Expanded(
@@ -691,162 +880,104 @@ class _SettingsScreenState extends State<SettingsScreen>
                     ],
                   ),
 
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed: () =>
-                              _tryAutoDetectAndAddKeyFromClipboard(
-                            silentIfNotFound: false,
-                          ),
-                          icon: const Icon(Icons.content_paste_go, size: 18),
-                          label: const Text(
-                            'Вставить из буфера',
-                            style: TextStyle(fontSize: 12),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      OutlinedButton.icon(
-                        onPressed: () => _openProviderEditor(),
-                        icon: const Icon(Icons.add, size: 18),
-                        label: const Text(
-                          'Вручную',
-                          style: TextStyle(fontSize: 12),
-                        ),
-                      ),
-                    ],
+                  const SizedBox(height: 16),
+
+                  // 1. Groq (отдельная ячейка)
+                  _buildDedicatedProviderBox(
+                    accent: accent,
+                    orderNumber: 1,
+                    title: 'Groq Free (Основной)',
+                    keyHint: 'gsk_...',
+                    portalUrl: 'https://console.groq.com/keys',
+                    keyController: _groqKeyCtrl,
+                    modelsController: _groqModelsCtrl,
+                    enabled: _groqEnabled,
+                    onToggleEnabled: (v) => setState(() => _groqEnabled = v),
+                    obscureKey: _obscureGroq,
+                    onToggleObscure: () =>
+                        setState(() => _obscureGroq = !_obscureGroq),
                   ),
 
-                  const SizedBox(height: 14),
+                  // 2. Google Gemini (отдельная ячейка)
+                  _buildDedicatedProviderBox(
+                    accent: accent,
+                    orderNumber: 2,
+                    title: 'Google Gemini Free',
+                    keyHint: 'AIza...',
+                    portalUrl: 'https://aistudio.google.com/app/apikey',
+                    keyController: _geminiKeyCtrl,
+                    modelsController: _geminiModelsCtrl,
+                    enabled: _geminiEnabled,
+                    onToggleEnabled: (v) => setState(() => _geminiEnabled = v),
+                    obscureKey: _obscureGemini,
+                    onToggleObscure: () =>
+                        setState(() => _obscureGemini = !_obscureGemini),
+                  ),
 
-                  if (_providers.isEmpty)
+                  // 3. OpenRouter (отдельная ячейка)
+                  _buildDedicatedProviderBox(
+                    accent: accent,
+                    orderNumber: 3,
+                    title: 'OpenRouter Free',
+                    keyHint: 'sk-or-...',
+                    portalUrl: 'https://openrouter.ai/settings/keys',
+                    keyController: _openRouterKeyCtrl,
+                    modelsController: _openRouterModelsCtrl,
+                    enabled: _openRouterEnabled,
+                    onToggleEnabled: (v) =>
+                        setState(() => _openRouterEnabled = v),
+                    obscureKey: _obscureOpenRouter,
+                    onToggleObscure: () =>
+                        setState(() => _obscureOpenRouter = !_obscureOpenRouter),
+                  ),
+
+                  // Дополнительные провайдеры (если добавлены пользователем)
+                  for (int i = 0; i < _extraProviders.length; i++)
                     Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(12),
+                      margin: const EdgeInsets.only(bottom: 8),
+                      padding: const EdgeInsets.all(10),
                       decoration: BoxDecoration(
                         color: const Color(0xFF191613),
                         borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Colors.white12),
                       ),
-                      child: const Text(
-                        'Активных ключей пока нет. Нажмите «В 1 клик (Groq)» для быстрого старта или «Несколько моделей сразу», чтобы подключить Groq + Gemini + OpenRouter.',
-                        style: TextStyle(fontSize: 12, color: Color(0xFFA89E93)),
-                      ),
-                    )
-                  else ...[
-                    Text(
-                      'Активная очередь провайдеров (${_providers.length}):',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: accent,
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '${i + 4}. ${_extraProviders[i].name}',
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.edit_outlined, size: 18),
+                            onPressed: () => _openExtraProviderEditor(
+                              existing: _extraProviders[i],
+                              index: i,
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(
+                              Icons.delete_outline,
+                              size: 18,
+                              color: Colors.redAccent,
+                            ),
+                            onPressed: () =>
+                                setState(() => _extraProviders.removeAt(i)),
+                          ),
+                        ],
                       ),
                     ),
-                    const SizedBox(height: 8),
-                    for (int i = 0; i < _providers.length; i++)
-                      Container(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF191613),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: _providers[i].enabled
-                                ? accent.withOpacity(0.4)
-                                : Colors.white12,
-                          ),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                CircleAvatar(
-                                  radius: 11,
-                                  backgroundColor: accent.withOpacity(0.2),
-                                  child: Text(
-                                    '${i + 1}',
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.bold,
-                                      color: accent,
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    _providers[i].name,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 14,
-                                    ),
-                                  ),
-                                ),
-                                Switch(
-                                  activeColor: accent,
-                                  value: _providers[i].enabled,
-                                  onChanged: (v) {
-                                    setState(() {
-                                      _providers[i] =
-                                          _providers[i].copyWith(enabled: v);
-                                    });
-                                  },
-                                ),
-                              ],
-                            ),
-                            Text(
-                              'Модели: ${_providers[i].models.join(', ')}',
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontSize: 12,
-                                color: Color(0xFFA89E93),
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.end,
-                              children: [
-                                if (i > 0)
-                                  IconButton(
-                                    tooltip: 'Поднять приоритет',
-                                    icon:
-                                        const Icon(Icons.arrow_upward, size: 18),
-                                    onPressed: () {
-                                      setState(() {
-                                        final item = _providers.removeAt(i);
-                                        _providers.insert(i - 1, item);
-                                      });
-                                    },
-                                  ),
-                                IconButton(
-                                  tooltip: 'Редактировать',
-                                  icon:
-                                      const Icon(Icons.edit_outlined, size: 18),
-                                  onPressed: () => _openProviderEditor(
-                                    existing: _providers[i],
-                                    index: i,
-                                  ),
-                                ),
-                                IconButton(
-                                  tooltip: 'Удалить',
-                                  icon: const Icon(
-                                    Icons.delete_outline,
-                                    size: 18,
-                                    color: Colors.redAccent,
-                                  ),
-                                  onPressed: () {
-                                    setState(() => _providers.removeAt(i));
-                                  },
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                  ],
+
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton.icon(
+                      onPressed: () => _openExtraProviderEditor(),
+                      icon: const Icon(Icons.add, size: 18),
+                      label: const Text('Добавить свой API'),
+                    ),
+                  ),
 
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
@@ -866,7 +997,6 @@ class _SettingsScreenState extends State<SettingsScreen>
 
           const SizedBox(height: 12),
 
-          // БЛОК 2: Встроенный офлайн-переводчик (Google ML Kit)
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -956,7 +1086,6 @@ class _SettingsScreenState extends State<SettingsScreen>
 
           const SizedBox(height: 12),
 
-          // БЛОК 3: Резервное копирование библиотеки книг, прогресса и словаря
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -1010,7 +1139,6 @@ class _SettingsScreenState extends State<SettingsScreen>
 
           const SizedBox(height: 12),
 
-          // БЛОК 4: Язык перевода
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
