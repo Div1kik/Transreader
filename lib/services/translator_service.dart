@@ -56,7 +56,6 @@ class TranslatorService {
     return false;
   }
 
-  /// Возвращает минимальное ожидание ТОЛЬКО если есть модели в реальном 429-лимите
   int getShortestRateLimitSeconds() {
     if (_routeRateLimitedUntil.isEmpty) return 0;
     final now = DateTime.now();
@@ -72,6 +71,19 @@ class TranslatorService {
 
   bool _isCyrillic(String text) {
     return RegExp(r'[а-яА-ЯёЁ]').hasMatch(text);
+  }
+
+  Map<String, String> _buildProviderHeaders(ApiProviderProfile provider) {
+    final isOpenRouter = provider.endpointUrl.contains('openrouter.ai');
+    return <String, String>{
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Authorization': 'Bearer ${provider.apiKey}',
+      if (isOpenRouter) ...{
+        'HTTP-Referer': 'https://github.com/Div1kik/Transreader',
+        'X-Title': 'TransReader',
+      },
+    };
   }
 
   Future<String> translateSelection({
@@ -133,11 +145,7 @@ class TranslatorService {
             final response = await http
                 .post(
                   Uri.parse(provider.endpointUrl),
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json',
-                    'Authorization': 'Bearer ${provider.apiKey}',
-                  },
+                  headers: _buildProviderHeaders(provider),
                   body: jsonEncode({
                     'model': model,
                     'temperature': 0.0,
@@ -265,7 +273,7 @@ class TranslatorService {
         );
       }
       throw Exception(
-        'Все провайдеры отклонили запрос (проверьте VPN или ключи в настройках)',
+        'Все провайдеры отклонили запрос (проверьте модели и ключи в настройках)',
       );
     }
 
@@ -309,7 +317,6 @@ class TranslatorService {
       } catch (_) {}
     }
 
-    // Ждём квоту только если хотя бы одна модель реально ушла в 429 Rate Limit
     final waitSec = getShortestRateLimitSeconds();
     if (waitSec > 0) {
       throw ModelRateLimitException(
@@ -349,7 +356,6 @@ class TranslatorService {
         rethrow;
       } catch (e) {
         final text = e.toString();
-        // При 400/401/403 повторный запрос к той же модели бессмысленен — сразу идём к следующей модели
         if (text.contains('(400)') ||
             text.contains('(401)') ||
             text.contains('(403)') ||
@@ -405,7 +411,6 @@ $contextBlock
 ${jsonEncode(numberedInput)}
 ''';
 
-    // Без response_format: json_object, так как Gemini OpenAI-compat и ряд моделей OpenRouter возвращают на него 400 Bad Request
     final body = jsonEncode({
       'model': model,
       'temperature': 0.25,
@@ -418,14 +423,7 @@ ${jsonEncode(numberedInput)}
     final response = await http
         .post(
           uri,
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-            'User-Agent': 'TransReader/1.0',
-            'HTTP-Referer': 'https://transreader.app',
-            'X-Title': 'TransReader',
-            'Authorization': 'Bearer ${provider.apiKey}',
-          },
+          headers: _buildProviderHeaders(provider),
           body: body,
         )
         .timeout(const Duration(seconds: 60));
