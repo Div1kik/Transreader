@@ -21,6 +21,16 @@ class ModelRateLimitException implements Exception {
       'Лимит модели $model (пауза ${retryAfterSeconds}с): $rawMessage';
 }
 
+class TranslatedParagraphOutput {
+  final String translation;
+  final Map<String, String> wordAlignMap;
+
+  const TranslatedParagraphOutput({
+    required this.translation,
+    this.wordAlignMap = const {},
+  });
+}
+
 class TranslatorService {
   TranslatorSettings settings;
   final Map<String, DateTime> _routeRateLimitedUntil = {};
@@ -108,12 +118,12 @@ class TranslatorService {
     }
 
     try {
-      final translated = await translateBatch(
+      final translated = await translateBatchWithAlignments(
         paragraphs: [clean],
         previousContext: const [],
         targetLanguage: effectiveTarget,
       );
-      return translated.isNotEmpty ? translated.first : '';
+      return translated.isNotEmpty ? translated.first.translation : '';
     } catch (_) {
       return OfflineTranslatorService.instance.translateText(
         clean,
@@ -123,9 +133,7 @@ class TranslatorService {
     }
   }
 
-  /// Трёхуровневый поиск парного слова в билингве:
-  /// 1) Мгновенный локальный ML Kit (~10 мс, если модель скачана)
-  /// 2) Быстрый страховочный запрос к первому живому ИИ-провайдеру (таймаут 3.5 сек), если ML Kit не скачан
+  /// Запасной поиск для старых глав (переведённых до появления wordAlignMap)
   Future<String> findCounterpartWordInContext({
     required String tappedWord,
     required String sourceParagraph,
@@ -138,7 +146,6 @@ class TranslatorService {
     final isRussianTap = _isCyrillic(cleanWord);
     final targetLang = isRussianTap ? 'English' : settings.targetLanguage;
 
-    // Уровень 2: проверяем, скачан ли локальный словарь ML Kit
     final mlKitReady = await OfflineTranslatorService.instance.isPairDownloaded(
       targetLanguage: settings.targetLanguage,
     );
@@ -160,90 +167,27 @@ class TranslatorService {
       } catch (_) {}
     }
 
-    // Уровень 3: если ML Kit не скачан — быстрый фолбэк на первый доступный онлайн-провайдер (таймаут 3.5 сек)
-    if (settings.hasAnyOnlineKey) {
-      final providers = settings.effectiveProviders;
-      for (final provider in providers) {
-        for (final model in provider.models) {
-          if (isRouteCoolingDown(provider, model)) continue;
-          try {
-            final pct = (relativePosition * 100).round();
-            final response = await http
-                .post(
-                  Uri.parse(provider.endpointUrl),
-                  headers: _buildProviderHeaders(provider),
-                  body: jsonEncode({
-                    'model': model,
-                    'temperature': 0.0,
-                    'max_tokens': 24,
-                    'messages': [
-                      {
-                        'role': 'system',
-                        'content':
-                            'Given a tapped word in a source paragraph (at ~$pct% of text) and its translated target paragraph, output ONLY the single exact matching word copied verbatim from the target paragraph. No punctuation or explanation.',
-                      },
-                      {
-                        'role': 'user',
-                        'content':
-                            'Tapped: "$cleanWord"\nSource: "$sourceParagraph"\nTarget: "$targetParagraph"\nExact word from Target:',
-                      },
-                    ],
-                  }),
-                )
-                .timeout(const Duration(milliseconds: 3500));
-
-            if (response.statusCode >= 200 && response.statusCode < 300) {
-              final decoded = jsonDecode(utf8.decode(response.bodyBytes));
-              final rawReply =
-                  decoded['choices']?[0]?['message']?['content']?.toString() ??
-                      '';
-              final cleanedReply = rawReply
-                  .trim()
-                  .split(RegExp(r'\s+'))
-                  .first
-                  .replaceAll(
-                    RegExp(r'^["«“„()\[\]]+|["»”„.,!?;:()\[\]]+$'),
-                    '',
-                  );
-              if (cleanedReply.isNotEmpty) {
-                return cleanedReply;
-              }
-            } else if (response.statusCode == 400 ||
-                response.statusCode == 401 ||
-                response.statusCode == 403 ||
-                response.statusCode == 404) {
-              _routeErrorCooldownUntil[_routeKey(provider, model)] =
-                  DateTime.now().add(const Duration(seconds: 30));
-            }
-          } catch (_) {
-            // Пробуем следующую живую модель
-            continue;
-          }
-        }
-      }
-    }
-
     return '';
   }
 
-  Future<List<String>> _translateWithOfflineMlKit(
+  Future<List<TranslatedParagraphOutput>> _translateWithOfflineMlKit(
     List<String> paragraphs,
     String targetLanguage,
     void Function(String activeModel)? onModelSelected,
   ) async {
     onModelSelected?.call('Offline ML Kit');
-    final results = <String>[];
+    final results = <TranslatedParagraphOutput>[];
     for (final p in paragraphs) {
       final tr = await OfflineTranslatorService.instance.translateText(
         p,
         targetLanguage: targetLanguage,
       );
-      results.add(tr);
+      results.add(TranslatedParagraphOutput(translation: tr));
     }
     return results;
   }
 
-  Future<List<String>> translateBatch({
+  Future<List<TranslatedParagraphOutput>> translateBatchWithAlignments({
     required List<String> paragraphs,
     required List<String> previousContext,
     required String targetLanguage,
@@ -361,7 +305,7 @@ class TranslatorService {
     );
   }
 
-  Future<List<String>> _callRouteWithRetry({
+  Future<List<TranslatedParagraphOutput>> _callRouteWithRetry({
     required ApiProviderProfile provider,
     required String model,
     required List<String> paragraphs,
@@ -400,7 +344,15 @@ class TranslatorService {
         Exception('Ошибка запроса к ${provider.name} ($model)');
   }
 
-  Future<List<String>> _sendRequest({
+  String _cleanTokenKey(String raw) {
+    return raw
+        .toLowerCase()
+        .replaceAll('ё', 'е')
+        .replaceAll(RegExp(r"[^\p{L}\p{N}'’-]", unicode: true), '')
+        .trim();
+  }
+
+  Future<List<TranslatedParagraphOutput>> _sendRequest({
     required ApiProviderProfile provider,
     required String model,
     required List<String> paragraphs,
@@ -420,22 +372,22 @@ class TranslatorService {
 
     final systemPrompt = '''
 Ты опытный литературный переводчик художественной прозы и эпического фэнтези на $targetLanguage язык.
-Твоя задача — сделать живой, естественный, грамотный и точный художественный перевод, который читается как книга, написанная носителем языка.
+Твоя задача — сделать живой, естественный, грамотный художественный перевод И построить для каждого абзаца карту соответствий значащих слов ("alignments"), чтобы читатель мог нажать на любое слово в русском или английском тексте и увидеть его точный эквивалент.
 
 Строгие правила качества:
-1. Никакого подстрочника и дословной кальки английского синтаксиса: перестраивай фразы так, чтобы они звучали естественно по-русски, сохраняя смысл, атмосферу и ритм автора.
-2. Имена собственные, топонимы и названия кланов/орденов аккуратно транслитерируй в едином стиле и склоняй по правилам русского языка (например: Uthas -> Утас, Veradis -> Верадис, Corban -> Корбан, Benothi -> Беноти, Forn Forest -> лес Форн). Не переводи имена нарицательными словами!
-3. Следи за согласованием родов, падежей и местоимений, опираясь на контекст предыдущих абзацев.
-4. Прямую речь оформляй в соответствии с нормами русского языка («...» или тире).
-5. Переводи строго каждый абзац из входного JSON-объекта ("0", "1", ...), не пропуская предложения и не объединяя соседние абзацы.
-6. Ответь СТРОГО валидным JSON-объектом без markdown-обёрток и комментариев: {"translations": ["перевод 0", "перевод 1", ...]}.
+1. Никакого подстрочника и дословной кальки: перестраивай фразы так, чтобы они звучали естественно по-русски, сохраняя смысл, атмосферу и ритм автора.
+2. Имена собственные, топонимы и названия кланов аккуратно транслитерируй в едином стиле и склоняй по правилам русского языка (например: Uthas -> Утас, Veradis -> Верадис, Corban -> Корбан, Benothi -> Беноти, Forn Forest -> лес Форн). Не переводи имена нарицательными словами!
+3. Следи за согласованием родов, падежей и местоимений, опираясь на контекст предыдущих абзацев. Прямую речь оформляй в русских кавычках «...» или через тире.
+4. Для каждого абзаца сформируй объект "align": словарь вида {"слово_из_перевода": "word_from_source"}, связывающий все значащие слова (существительные, глаголы, прилагательные, наречия, имена) ровно в той словоформе, как они написаны в тексте! Не включай в "align" артикли (the, a, an) и предлоги.
+5. Ответь СТРОГО валидным JSON-объектом без markdown-обёрток:
+{"items": [{"translation": "перевод абзаца 0", "align": {"котел": "cauldron", "массивную": "hulking"}}, ...]}
 ''';
 
     final userPrompt = '''
 ПРЕДЫДУЩИЙ КОНТЕКСТ СЦЕНЫ (оригинал для понимания сюжета, родов и имён — не включать в ответ):
 $contextBlock
 
-АБЗАЦЫ ДЛЯ ХУДОЖЕСТВЕННОГО ПЕРЕВОДА (ровно ${paragraphs.length} шт.):
+АБЗАЦЫ ДЛЯ ПЕРЕВОДА И ВЫРАВНИВАНИЯ СЛОВ (ровно ${paragraphs.length} шт.):
 ${jsonEncode(numberedInput)}
 ''';
 
@@ -454,7 +406,7 @@ ${jsonEncode(numberedInput)}
           headers: _buildProviderHeaders(provider),
           body: body,
         )
-        .timeout(const Duration(seconds: 60));
+        .timeout(const Duration(seconds: 65));
 
     if (response.statusCode == 429) {
       final retryHeader = response.headers['retry-after'];
@@ -497,30 +449,75 @@ ${jsonEncode(numberedInput)}
 
     final cleanJson = _extractJsonObject(content);
     final parsedContent = jsonDecode(cleanJson);
-    final translationsRaw = parsedContent['translations'];
 
-    if (translationsRaw is! List || translationsRaw.length != paragraphs.length) {
-      throw Exception(
-        'Модель $model вернула ${translationsRaw is List ? translationsRaw.length : 0} абзацев вместо ${paragraphs.length}',
-      );
+    // Поддерживаем как новый формат {"items": [...]}, так и запасной {"translations": [...]}
+    final itemsRaw = parsedContent['items'];
+    final translationsFallback = parsedContent['translations'];
+
+    if (itemsRaw is List && itemsRaw.length == paragraphs.length) {
+      final result = <TranslatedParagraphOutput>[];
+      for (int i = 0; i < itemsRaw.length; i++) {
+        final item = itemsRaw[i];
+        if (item is! Map) {
+          throw Exception('Некорректный элемент #$i в ответе модели $model');
+        }
+        final tr = (item['translation'] ?? '').toString().trim();
+        final src = paragraphs[i].trim();
+        if (tr.isEmpty) {
+          throw Exception('Модель $model вернула пустой перевод абзаца #$i');
+        }
+        if (targetLanguage.toLowerCase().contains('russian') &&
+            src.length > 25 &&
+            !_isCyrillic(tr)) {
+          throw Exception('Модель $model не перевела абзац #$i на русский язык');
+        }
+
+        final biMap = <String, String>{};
+        final rawAlign = item['align'];
+        if (rawAlign is Map) {
+          rawAlign.forEach((k, v) {
+            final cleanK = _cleanTokenKey(k.toString());
+            final cleanV = _cleanTokenKey(v.toString());
+            if (cleanK.isNotEmpty && cleanV.isNotEmpty) {
+              // Записываем двустороннюю связку (RU -> EN и EN -> RU) для мгновенного поиска за 0 мс
+              biMap[cleanK] = cleanV;
+              biMap[cleanV] = cleanK;
+            }
+          });
+        }
+
+        result.add(
+          TranslatedParagraphOutput(
+            translation: tr,
+            wordAlignMap: biMap,
+          ),
+        );
+      }
+      return result;
     }
 
-    final result = <String>[];
-    for (int i = 0; i < translationsRaw.length; i++) {
-      final tr = translationsRaw[i].toString().trim();
-      final src = paragraphs[i].trim();
-      if (tr.isEmpty) {
-        throw Exception('Модель $model вернула пустой перевод абзаца #$i');
+    if (translationsFallback is List &&
+        translationsFallback.length == paragraphs.length) {
+      final result = <TranslatedParagraphOutput>[];
+      for (int i = 0; i < translationsFallback.length; i++) {
+        final tr = translationsFallback[i].toString().trim();
+        final src = paragraphs[i].trim();
+        if (tr.isEmpty) {
+          throw Exception('Модель $model вернула пустой перевод абзаца #$i');
+        }
+        if (targetLanguage.toLowerCase().contains('russian') &&
+            src.length > 25 &&
+            !_isCyrillic(tr)) {
+          throw Exception('Модель $model не перевела абзац #$i на русский язык');
+        }
+        result.add(TranslatedParagraphOutput(translation: tr));
       }
-      if (targetLanguage.toLowerCase().contains('russian') &&
-          src.length > 25 &&
-          !_isCyrillic(tr)) {
-        throw Exception('Модель $model не перевела абзац #$i на русский язык');
-      }
-      result.add(tr);
+      return result;
     }
 
-    return result;
+    throw Exception(
+      'Модель $model вернула неверное число абзацев вместо ${paragraphs.length}',
+    );
   }
 
   String _extractJsonObject(String raw) {
