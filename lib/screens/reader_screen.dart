@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import '../db/book_database.dart';
 import '../models/book_models.dart';
 import '../models/reader_theme_settings.dart';
+import '../services/offline_translator_service.dart';
 import '../services/settings_service.dart';
 import '../services/translation_queue.dart';
 import '../services/translator_service.dart';
@@ -43,6 +44,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
   bool _loadingChapter = true;
   bool _showControls = true;
   String _scrollSelectedText = '';
+
+  bool _mlKitModelReady = true;
+  bool _downloadingDictInReader = false;
 
   late TranslatorSettings _settings;
   late final ScrollController _scrollController;
@@ -147,8 +151,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   Future<void> _initData() async {
     final savedAppearance = await ReaderAppearance.load();
+    final dictReady = await OfflineTranslatorService.instance.isPairDownloaded(
+      targetLanguage: _settings.targetLanguage,
+    );
     if (mounted) {
-      setState(() => _appearance = savedAppearance);
+      setState(() {
+        _appearance = savedAppearance;
+        _mlKitModelReady = dictReady;
+      });
     }
     await _refreshChaptersList();
 
@@ -165,6 +175,34 @@ class _ReaderScreenState extends State<ReaderScreen> {
       startScrollOffset: startScroll,
       saveProgress: false,
     );
+  }
+
+  Future<void> _downloadBilingualDictionary() async {
+    setState(() => _downloadingDictInReader = true);
+    try {
+      await OfflineTranslatorService.instance.downloadLanguagePair(
+        targetLanguage: _settings.targetLanguage,
+      );
+      if (!mounted) return;
+      _wordLookupCache.clear();
+      setState(() => _mlKitModelReady = true);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Словарь загружен! Подсветка слов теперь работает за 0 мс.',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.toString().replaceFirst('Exception: ', '')),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _downloadingDictInReader = false);
+    }
   }
 
   void _updateAppearance(ReaderAppearance next) {
@@ -317,7 +355,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     required double relativePosition,
   }) async {
     final cacheKey =
-        '${_settings.engineMode.index}_${tappedWord.toLowerCase()}_${sourceParagraph.hashCode}_${(relativePosition * 10).round()}';
+        '${tappedWord.toLowerCase()}_${sourceParagraph.hashCode}';
     if (_wordLookupCache.containsKey(cacheKey)) {
       return _wordLookupCache[cacheKey]!;
     }
@@ -906,7 +944,35 @@ class _ReaderScreenState extends State<ReaderScreen> {
   String _normalizeWord(String raw) {
     return raw
         .toLowerCase()
+        .replaceAll('ё', 'е')
         .replaceAll(RegExp(r"[^\p{L}\p{N}'’-]", unicode: true), '');
+  }
+
+  String _stemWord(String w) {
+    if (w.length <= 3) return w;
+    final stripped = w.replaceFirst(
+      RegExp(
+        r'(ами|ями|ому|ему|ого|его|ыми|ими|ться|тся|ешь|ете|ишь|ите|ать|ять|ить|еть|уть|ая|яя|ое|ее|ые|ие|ый|ий|ой|ах|ях|ом|ем|ам|ям|ов|ев|ей|ий|ую|юю|ing|ed|es|ly|er|est|s|а|я|о|е|у|ю|ы|и|ь)$',
+      ),
+      '',
+    );
+    return stripped.length >= 3 ? stripped : w;
+  }
+
+  String _transliterateRuToEn(String ru) {
+    const map = {
+      'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e',
+      'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l',
+      'м': 'm', 'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r', 'с': 's',
+      'т': 't', 'у': 'u', 'ф': 'f', 'х': 'h', 'ц': 'ts', 'ч': 'ch',
+      'ш': 'sh', 'щ': 'sch', 'ы': 'y', 'э': 'e', 'ю': 'yu', 'я': 'ya',
+    };
+    final sb = StringBuffer();
+    for (int i = 0; i < ru.length; i++) {
+      final ch = ru[i];
+      sb.write(map[ch] ?? ch);
+    }
+    return sb.toString();
   }
 
   int? _findBestMatchToken({
@@ -918,15 +984,17 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final tokens = _tokenize(targetParagraph);
     if (tokens.isEmpty) return null;
 
-    final candidates = <String>[
+    final rawCandidates = <String>[
       ...candidateTranslation
           .split(RegExp(r'\s+'))
           .map(_normalizeWord)
           .where((w) => w.isNotEmpty),
       ...(_pronounHints[tappedNormWord] ?? const []),
+      _transliterateRuToEn(tappedNormWord),
     ];
 
-    if (candidates.isEmpty) return null;
+    final candidateStems = rawCandidates.map(_stemWord).toList();
+    if (rawCandidates.isEmpty) return null;
 
     int? bestIdx;
     double bestScore = -1.0;
@@ -934,31 +1002,40 @@ class _ReaderScreenState extends State<ReaderScreen> {
     for (int i = 0; i < tokens.length; i++) {
       final normW = _normalizeWord(tokens[i]);
       if (normW.isEmpty) continue;
+      final stemW = _stemWord(normW);
 
       final posRatio = i / tokens.length;
-      final posPenalty = (posRatio - relativePosition).abs() * 1.4;
+      final posPenalty = (posRatio - relativePosition).abs() * 1.2;
 
-      for (int cIdx = 0; cIdx < candidates.length; cIdx++) {
-        final cand = candidates[cIdx];
-        final candBonus = cIdx == 0 ? 0.3 : 0.0;
+      for (int cIdx = 0; cIdx < rawCandidates.length; cIdx++) {
+        final cand = rawCandidates[cIdx];
+        final candStem = candidateStems[cIdx];
+        final candBonus = cIdx == 0 ? 0.35 : 0.0;
 
         if (normW == cand) {
-          final score = 10.0 + candBonus - posPenalty;
+          final score = 12.0 + candBonus - posPenalty;
+          if (score > bestScore) {
+            bestScore = score;
+            bestIdx = i;
+          }
+        } else if (stemW.length >= 3 && stemW == candStem) {
+          final score = 9.5 + candBonus - posPenalty;
           if (score > bestScore) {
             bestScore = score;
             bestIdx = i;
           }
         } else {
-          final minLen = math.min(normW.length, cand.length);
+          final minLen = math.min(stemW.length, candStem.length);
           if (minLen >= 3) {
             int commonPrefix = 0;
             while (commonPrefix < minLen &&
-                normW[commonPrefix] == cand[commonPrefix]) {
+                stemW[commonPrefix] == candStem[commonPrefix]) {
               commonPrefix++;
             }
-            final ratio = commonPrefix / math.max(normW.length, cand.length);
-            if (ratio >= 0.58) {
-              final score = ratio * 6.0 + candBonus - posPenalty;
+            final ratio =
+                commonPrefix / math.max(stemW.length, candStem.length);
+            if (ratio >= 0.55) {
+              final score = ratio * 6.5 + candBonus - posPenalty;
               if (score > bestScore) {
                 bestScore = score;
                 bestIdx = i;
@@ -994,48 +1071,57 @@ class _ReaderScreenState extends State<ReaderScreen> {
       return;
     }
 
-    setState(() {
-      _scrollHighlightOrder = paragraph.orderIndex;
-      if (isOriginalText) {
-        _scrollHighlightSourceToken = tokenIndex;
-        _scrollHighlightTranslatedToken = null;
-      } else {
-        _scrollHighlightTranslatedToken = tokenIndex;
-        _scrollHighlightSourceToken = null;
-      }
-    });
-
     final sourceText =
         isOriginalText ? paragraph.sourceText : paragraph.translatedText!;
     final targetText =
         isOriginalText ? paragraph.translatedText! : paragraph.sourceText;
 
-    try {
-      final candidate = await _lookupWordInContext(
-        tappedWord: cleanWord,
-        sourceParagraph: sourceText,
-        targetParagraph: targetText,
-        relativePosition: relPos,
-      );
-      if (!mounted) return;
-      if (_scrollHighlightOrder != paragraph.orderIndex) return;
+    final instantMatch = _findBestMatchToken(
+      targetParagraph: targetText,
+      tappedNormWord: cleanWord,
+      candidateTranslation: '',
+      relativePosition: relPos,
+    );
 
-      final matchedToken = _findBestMatchToken(
-        targetParagraph: targetText,
-        tappedNormWord: cleanWord,
-        candidateTranslation: candidate,
-        relativePosition: relPos,
-      );
-      if (matchedToken != null) {
-        setState(() {
-          if (isOriginalText) {
-            _scrollHighlightTranslatedToken = matchedToken;
-          } else {
-            _scrollHighlightSourceToken = matchedToken;
-          }
-        });
+    setState(() {
+      _scrollHighlightOrder = paragraph.orderIndex;
+      if (isOriginalText) {
+        _scrollHighlightSourceToken = tokenIndex;
+        _scrollHighlightTranslatedToken = instantMatch;
+      } else {
+        _scrollHighlightTranslatedToken = tokenIndex;
+        _scrollHighlightSourceToken = instantMatch;
       }
-    } catch (_) {}
+    });
+
+    if (instantMatch == null) {
+      try {
+        final candidate = await _lookupWordInContext(
+          tappedWord: cleanWord,
+          sourceParagraph: sourceText,
+          targetParagraph: targetText,
+          relativePosition: relPos,
+        );
+        if (!mounted) return;
+        if (_scrollHighlightOrder != paragraph.orderIndex) return;
+
+        final matchedToken = _findBestMatchToken(
+          targetParagraph: targetText,
+          tappedNormWord: cleanWord,
+          candidateTranslation: candidate,
+          relativePosition: relPos,
+        );
+        if (matchedToken != null) {
+          setState(() {
+            if (isOriginalText) {
+              _scrollHighlightTranslatedToken = matchedToken;
+            } else {
+              _scrollHighlightSourceToken = matchedToken;
+            }
+          });
+        }
+      } catch (_) {}
+    }
   }
 
   Widget _buildScrollInteractiveText({
@@ -1406,6 +1492,47 @@ class _ReaderScreenState extends State<ReaderScreen> {
                           size: 16,
                           color: palette.text,
                         ),
+                      ),
+                    ],
+                  ),
+                ),
+              if (_appearance.showOriginal && !_mlKitModelReady)
+                Container(
+                  width: double.infinity,
+                  color: palette.accent.withOpacity(0.14),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  child: Row(
+                    children: [
+                      Icon(Icons.flash_on, size: 16, color: palette.accent),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Для мгновенной подсветки слов без сети скачайте словарь (~30 МБ)',
+                          style: TextStyle(fontSize: 11, color: palette.text),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: _downloadingDictInReader
+                            ? null
+                            : _downloadBilingualDictionary,
+                        child: _downloadingDictInReader
+                            ? SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: palette.accent,
+                                ),
+                              )
+                            : Text(
+                                'Скачать',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                  color: palette.accent,
+                                ),
+                              ),
                       ),
                     ],
                   ),
