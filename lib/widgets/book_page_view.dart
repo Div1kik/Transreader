@@ -18,6 +18,7 @@ class BookPageSlice {
 class BookPageView extends StatefulWidget {
   final String chapterTitle;
   final List<ParagraphItem> paragraphs;
+  final List<BookBookmark> chapterBookmarks;
   final ReaderAppearance appearance;
   final ReaderPalette palette;
   final int initialPage;
@@ -28,6 +29,9 @@ class BookPageView extends StatefulWidget {
   final VoidCallback onTranslateHere;
   final ValueChanged<String> onTranslateSelection;
   final ValueChanged<String> onSaveSelectionToDictionary;
+  final void Function(String quoteText, int colorHex, int currentPage)
+      onHighlightSelection;
+  final ValueChanged<double>? onBrightnessDelta;
   final Future<String> Function({
     required String tappedWord,
     required String sourceParagraph,
@@ -39,6 +43,7 @@ class BookPageView extends StatefulWidget {
     super.key,
     required this.chapterTitle,
     required this.paragraphs,
+    this.chapterBookmarks = const [],
     required this.appearance,
     required this.palette,
     this.initialPage = 0,
@@ -49,6 +54,8 @@ class BookPageView extends StatefulWidget {
     required this.onTranslateHere,
     required this.onTranslateSelection,
     required this.onSaveSelectionToDictionary,
+    required this.onHighlightSelection,
+    this.onBrightnessDelta,
     required this.onLookupWordInContext,
   });
 
@@ -159,6 +166,12 @@ class _BookPageViewState extends State<BookPageView>
     super.dispose();
   }
 
+  String _formatParagraphText(String raw) {
+    final trimmed = raw.trim();
+    if (!widget.appearance.paragraphIndent || trimmed.isEmpty) return trimmed;
+    return '\u00A0\u00A0\u00A0\u00A0$trimmed';
+  }
+
   String _buildSignature(Size size, TextScaler textScaler) {
     return '${size.width.toInt()}x${size.height.toInt()}_'
         '${textScaler.scale(10)}_'
@@ -167,6 +180,9 @@ class _BookPageViewState extends State<BookPageView>
         '${widget.paragraphs.where((p) => p.isTranslated).length}_'
         '${widget.appearance.fontSize}_'
         '${widget.appearance.lineHeight}_'
+        '${widget.appearance.horizontalMargin}_'
+        '${widget.appearance.fontFamily.index}_'
+        '${widget.appearance.paragraphIndent}_'
         '${widget.appearance.textDisplay.index}';
   }
 
@@ -174,7 +190,7 @@ class _BookPageViewState extends State<BookPageView>
     BoxConstraints constraints,
     TextScaler textScaler,
   ) {
-    const horizontalPadding = 20.0;
+    final horizontalPadding = widget.appearance.horizontalMargin;
     const verticalPadding = 28.0;
     const footerHeight = 36.0;
 
@@ -184,16 +200,21 @@ class _BookPageViewState extends State<BookPageView>
         (constraints.maxHeight - verticalPadding - footerHeight - 24.0)
             .clamp(140.0, 4000.0);
 
+    final fontFam = widget.appearance.flutterFontFamily;
+
     final mainStyle = TextStyle(
+      fontFamily: fontFam,
       fontSize: widget.appearance.fontSize,
       height: widget.appearance.lineHeight,
     );
     final origStyle = TextStyle(
+      fontFamily: fontFam,
       fontSize: (widget.appearance.fontSize - 3.5).clamp(11.0, 24.0),
       height: 1.38,
       fontStyle: FontStyle.italic,
     );
     final headerStyle = TextStyle(
+      fontFamily: fontFam,
       fontSize: widget.appearance.fontSize + 5,
       fontWeight: FontWeight.bold,
       height: 1.3,
@@ -216,17 +237,23 @@ class _BookPageViewState extends State<BookPageView>
         measureTextHeight(widget.chapterTitle, headerStyle) + 18.0;
 
     for (final p in widget.paragraphs) {
-      double itemHeight = 14.0;
+      double itemHeight = 12.0;
 
       if (widget.appearance.isOriginalOnly) {
-        itemHeight += measureTextHeight(p.sourceText, mainStyle);
+        itemHeight +=
+            measureTextHeight(_formatParagraphText(p.sourceText), mainStyle);
       } else if (p.isTranslated) {
-        itemHeight += measureTextHeight(p.translatedText!, mainStyle);
+        itemHeight += measureTextHeight(
+            _formatParagraphText(p.translatedText!), mainStyle);
         if (widget.appearance.showOriginal) {
-          itemHeight += measureTextHeight(p.sourceText, origStyle) + 8.0;
+          itemHeight +=
+              measureTextHeight(_formatParagraphText(p.sourceText), origStyle) +
+                  8.0;
         }
       } else {
-        itemHeight += measureTextHeight(p.sourceText, mainStyle) + 30.0;
+        itemHeight +=
+            measureTextHeight(_formatParagraphText(p.sourceText), mainStyle) +
+                30.0;
       }
 
       if (usedHeight + itemHeight > availableHeight &&
@@ -372,7 +399,6 @@ class _BookPageViewState extends State<BookPageView>
     final tokens = _tokenize(targetParagraph);
     if (tokens.isEmpty) return null;
 
-    // 1. Приоритет №1: прямая карта выравнивания от ИИ-переводчика (0 мс, 100% точность художественного текста)
     final alignedFromAi = paragraph.wordAlignMap[tappedNormWord] ??
         paragraph.wordAlignMap[_stemWord(tappedNormWord)];
 
@@ -486,10 +512,9 @@ class _BookPageViewState extends State<BookPageView>
     final targetText =
         tappedInOriginal ? paragraph.translatedText! : paragraph.sourceText;
 
-    // Мгновенный поиск по встроенной карте выравнивания ИИ + словарю местоимений + транслитерации (0 мс!)
     int? instantMatchIdx = _findBestMatchingTokenIndex(
       paragraph: paragraph,
-      targetParagraph: targetText,
+      targetParagraph: _formatParagraphText(targetText),
       tappedNormWord: cleanWord,
       candidateTranslation: '',
       relativePosition: relativePosition,
@@ -506,7 +531,6 @@ class _BookPageViewState extends State<BookPageView>
       }
     });
 
-    // Запасной локальный ML Kit только для старых глав, переведённых без wordAlignMap
     if (instantMatchIdx == null) {
       try {
         final candidate = await widget.onLookupWordInContext(
@@ -520,7 +544,7 @@ class _BookPageViewState extends State<BookPageView>
 
         final matchedTokenIdx = _findBestMatchingTokenIndex(
           paragraph: paragraph,
-          targetParagraph: targetText,
+          targetParagraph: _formatParagraphText(targetText),
           tappedNormWord: cleanWord,
           candidateTranslation: candidate,
           relativePosition: relativePosition,
@@ -539,12 +563,27 @@ class _BookPageViewState extends State<BookPageView>
     }
   }
 
+  Color? _findSavedHighlightColor(String paragraphText) {
+    final cleanP = paragraphText.trim();
+    if (cleanP.isEmpty) return null;
+    for (final b in widget.chapterBookmarks) {
+      final q = b.quoteText.trim();
+      if (q.length >= 4 && (cleanP.contains(q) || q.contains(cleanP))) {
+        return Color(b.colorHex).withOpacity(
+          widget.palette.brightness == Brightness.dark ? 0.25 : 0.45,
+        );
+      }
+    }
+    return null;
+  }
+
   Widget _buildInteractiveBilingualText({
     required ParagraphItem paragraph,
-    required String text,
+    required String rawText,
     required TextStyle baseStyle,
     required bool isOriginalText,
   }) {
+    final text = _formatParagraphText(rawText);
     final activeTokenIndex = _highlightedParagraphOrder == paragraph.orderIndex
         ? (isOriginalText
             ? _highlightedSourceTokenIndex
@@ -554,6 +593,8 @@ class _BookPageViewState extends State<BookPageView>
     final markerColor = widget.palette.brightness == Brightness.dark
         ? const Color(0xFFD98A3C).withOpacity(0.38)
         : const Color(0xFFFFD54F).withOpacity(0.78);
+
+    final savedQuoteBg = _findSavedHighlightColor(rawText);
 
     final tokens = _tokenize(text);
     final spans = <InlineSpan>[];
@@ -566,7 +607,14 @@ class _BookPageViewState extends State<BookPageView>
           isWord && activeTokenIndex != null && i == activeTokenIndex;
 
       if (!isWord) {
-        spans.add(TextSpan(text: token));
+        spans.add(
+          TextSpan(
+            text: token,
+            style: savedQuoteBg != null
+                ? baseStyle.copyWith(backgroundColor: savedQuoteBg)
+                : null,
+          ),
+        );
       } else {
         final relPos = tokens.isEmpty ? 0.5 : i / tokens.length;
         spans.add(
@@ -577,7 +625,9 @@ class _BookPageViewState extends State<BookPageView>
                     backgroundColor: markerColor,
                     fontWeight: FontWeight.w600,
                   )
-                : null,
+                : savedQuoteBg != null
+                    ? baseStyle.copyWith(backgroundColor: savedQuoteBg)
+                    : null,
             recognizer: TapGestureRecognizer()
               ..onTap = () {
                 _onBilingualWordTap(
@@ -595,6 +645,7 @@ class _BookPageViewState extends State<BookPageView>
 
     return Text.rich(
       TextSpan(style: baseStyle, children: spans),
+      textAlign: widget.appearance.textAlign,
     );
   }
 
@@ -619,6 +670,20 @@ class _BookPageViewState extends State<BookPageView>
             widget.onSaveSelectionToDictionary(cleanText);
           },
         ),
+        ContextMenuButtonItem(
+          label: 'Цитата (жёлт.)',
+          onPressed: () {
+            selectableRegionState.hideToolbar();
+            widget.onHighlightSelection(cleanText, 0xFFFFD54F, _currentPage);
+          },
+        ),
+        ContextMenuButtonItem(
+          label: 'Цитата (зел.)',
+          onPressed: () {
+            selectableRegionState.hideToolbar();
+            widget.onHighlightSelection(cleanText, 0xFF81C784, _currentPage);
+          },
+        ),
       ],
       ...selectableRegionState.contextMenuButtonItems,
     ];
@@ -627,6 +692,20 @@ class _BookPageViewState extends State<BookPageView>
       anchors: selectableRegionState.contextMenuAnchors,
       buttonItems: items,
     );
+  }
+
+  int _estimateMinutesLeftInChapter(int safeIdx) {
+    if (_pages.isEmpty) return 0;
+    int remainingWords = 0;
+    for (int i = safeIdx; i < _pages.length; i++) {
+      for (final p in _pages[i].items) {
+        final t = widget.appearance.isOriginalOnly
+            ? p.sourceText
+            : (p.translatedText ?? p.sourceText);
+        remainingWords += t.split(RegExp(r'\s+')).length;
+      }
+    }
+    return (remainingWords / 190).ceil().clamp(1, 999);
   }
 
   Widget _buildSinglePageContent(int pageIndex) {
@@ -643,12 +722,18 @@ class _BookPageViewState extends State<BookPageView>
 
     final safeIdx = pageIndex.clamp(0, _pages.length - 1);
     final slice = _pages[safeIdx];
+    final minsLeft = _estimateMinutesLeftInChapter(safeIdx);
 
     return Container(
       width: double.infinity,
       height: double.infinity,
       color: widget.palette.background,
-      padding: const EdgeInsets.fromLTRB(20, 14, 20, 12),
+      padding: EdgeInsets.fromLTRB(
+        widget.appearance.horizontalMargin,
+        14,
+        widget.appearance.horizontalMargin,
+        12,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -670,6 +755,7 @@ class _BookPageViewState extends State<BookPageView>
                         child: Text(
                           slice.chapterHeader!,
                           style: TextStyle(
+                            fontFamily: widget.appearance.flutterFontFamily,
                             fontSize: widget.appearance.fontSize + 5,
                             fontWeight: FontWeight.bold,
                             height: 1.3,
@@ -679,7 +765,7 @@ class _BookPageViewState extends State<BookPageView>
                       ),
                     for (final p in slice.items)
                       Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
+                        padding: const EdgeInsets.only(bottom: 10),
                         child: _buildParagraphBlock(p),
                       ),
                   ],
@@ -711,9 +797,9 @@ class _BookPageViewState extends State<BookPageView>
                     ),
                   ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: 8),
                 Text(
-                  'Стр. ${safeIdx + 1} из ${_pages.length}',
+                  '~$minsLeft мин • Стр. ${safeIdx + 1}/${_pages.length}',
                   style: TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w500,
@@ -729,24 +815,35 @@ class _BookPageViewState extends State<BookPageView>
   }
 
   Widget _buildParagraphBlock(ParagraphItem p) {
+    final fontFam = widget.appearance.flutterFontFamily;
+    final align = widget.appearance.textAlign;
+
     if (widget.appearance.isOriginalOnly) {
+      final quoteBg = _findSavedHighlightColor(p.sourceText);
       return Text(
-        p.sourceText,
+        _formatParagraphText(p.sourceText),
+        textAlign: align,
         style: TextStyle(
+          fontFamily: fontFam,
           fontSize: widget.appearance.fontSize,
           height: widget.appearance.lineHeight,
           color: widget.palette.text,
+          backgroundColor: quoteBg,
         ),
       );
     }
 
     if (p.isTranslated) {
+      final quoteBg = _findSavedHighlightColor(p.translatedText!);
       final translatedStyle = TextStyle(
+        fontFamily: fontFam,
         fontSize: widget.appearance.fontSize,
         height: widget.appearance.lineHeight,
         color: widget.palette.text,
+        backgroundColor: quoteBg,
       );
       final originalStyle = TextStyle(
+        fontFamily: fontFam,
         fontSize: (widget.appearance.fontSize - 3.5).clamp(11.0, 24.0),
         height: 1.38,
         color: widget.palette.secondaryText,
@@ -759,14 +856,14 @@ class _BookPageViewState extends State<BookPageView>
           children: [
             _buildInteractiveBilingualText(
               paragraph: p,
-              text: p.translatedText!,
+              rawText: p.translatedText!,
               baseStyle: translatedStyle,
               isOriginalText: false,
             ),
             const SizedBox(height: 5),
             _buildInteractiveBilingualText(
               paragraph: p,
-              text: p.sourceText,
+              rawText: p.sourceText,
               baseStyle: originalStyle,
               isOriginalText: true,
             ),
@@ -775,7 +872,8 @@ class _BookPageViewState extends State<BookPageView>
       }
 
       return Text(
-        p.translatedText!,
+        _formatParagraphText(p.translatedText!),
+        textAlign: align,
         style: translatedStyle,
       );
     }
@@ -784,8 +882,10 @@ class _BookPageViewState extends State<BookPageView>
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          p.sourceText,
+          _formatParagraphText(p.sourceText),
+          textAlign: align,
           style: TextStyle(
+            fontFamily: fontFam,
             fontSize: widget.appearance.fontSize - 1,
             height: widget.appearance.lineHeight,
             color: widget.palette.secondaryText,
@@ -1005,6 +1105,14 @@ class _BookPageViewState extends State<BookPageView>
           },
           child: GestureDetector(
             behavior: HitTestBehavior.translucent,
+            // Свайп вверх/вниз по левым 16% экрана плавно меняет яркость/фильтр экрана
+            onVerticalDragUpdate: (details) {
+              if (details.localPosition.dx < size.width * 0.16 &&
+                  widget.onBrightnessDelta != null) {
+                final delta = -(details.primaryDelta ?? 0) / size.height;
+                widget.onBrightnessDelta!(delta);
+              }
+            },
             onHorizontalDragStart: (_) {
               _curlController.stop();
               _isDragging = true;
