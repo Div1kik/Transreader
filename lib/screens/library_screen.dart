@@ -29,6 +29,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   List<Book> _books = [];
   bool _loading = true;
   bool _importing = false;
+  String? _importStatusText;
   int _tabIndex = 0;
 
   @override
@@ -61,11 +62,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _importBook() async {
-    setState(() => _importing = true);
+    setState(() {
+      _importing = true;
+      _importStatusText = 'Открытие файла...';
+    });
     try {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['fb2', 'txt', 'epub'],
+        allowedExtensions: ['fb2', 'txt', 'epub', 'pdf'],
         withData: true,
       );
 
@@ -84,6 +88,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
       final bundle = await BookParser.parseFromBytes(
         bytes: bytes,
         fileName: file.name,
+        onProgress: (status) {
+          if (mounted) {
+            setState(() => _importStatusText = status);
+          }
+        },
       );
 
       await BookDatabase.instance.insertBookWithChapters(
@@ -98,17 +107,22 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'Книга «${bundle.book.title}» (${bundle.book.format}) добавлена: глав ${bundle.book.totalChapters}',
+            'Документ «${bundle.book.title}» (${bundle.book.format}) добавлен: разделов ${bundle.book.totalChapters}',
           ),
         ),
       );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка импорта книги: $e')),
+        SnackBar(content: Text('Ошибка импорта: $e')),
       );
     } finally {
-      if (mounted) setState(() => _importing = false);
+      if (mounted) {
+        setState(() {
+          _importing = false;
+          _importStatusText = null;
+        });
+      }
     }
   }
 
@@ -129,7 +143,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Удалить книгу?'),
+        title: const Text('Удалить книгу / документ?'),
         content: Text('«${book.title}» и её перевод будут удалены из памяти.'),
         actions: [
           TextButton(
@@ -181,7 +195,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.auto_stories, color: accent, size: 22),
+          Icon(
+            book.format == 'PDF'
+                ? Icons.picture_as_pdf_outlined
+                : Icons.auto_stories,
+            color: accent,
+            size: 22,
+          ),
           const SizedBox(height: 2),
           Text(
             book.format,
@@ -219,6 +239,31 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ),
       body: Column(
         children: [
+          if (_importing && _importStatusText != null)
+            Container(
+              width: double.infinity,
+              color: accent.withOpacity(0.18),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: accent,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      _importStatusText!,
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           StreamBuilder<TranslationProgress>(
             stream: _queueController.progressStream,
             initialData: _queueController.currentProgress,
@@ -251,7 +296,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                             ? 'Нет сети — перевод «${p.activeBookTitle}» на паузе'
                             : p.rateLimitWaitSeconds > 0
                                 ? 'Лимит модели — ждём ${p.rateLimitWaitSeconds}с («${p.activeBookTitle}»)'
-                                : 'Переводится «${p.activeBookTitle}»: глава ${p.currentChapter} (${p.translatedParagraphsInChapter}/${p.totalParagraphsInChapter})',
+                                : 'Переводится «${p.activeBookTitle}»: раздел ${p.currentChapter} (${p.translatedParagraphsInChapter}/${p.totalParagraphsInChapter})',
                         style: const TextStyle(fontSize: 12),
                       ),
                     ),
@@ -291,7 +336,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                                   ),
                                   const SizedBox(height: 6),
                                   const Text(
-                                    'Нажмите «Добавить книгу», чтобы загрузить .epub, .fb2 или .txt файл.',
+                                    'Нажмите «Добавить книгу», чтобы загрузить .pdf (включая сканы), .epub, .fb2 или .txt файл.',
                                     textAlign: TextAlign.center,
                                     style: TextStyle(color: Color(0xFFA89E93)),
                                   ),
@@ -384,7 +429,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                                                   ),
                                                   const SizedBox(width: 8),
                                                   Text(
-                                                    'Гл. ${book.lastChapterIndex + 1}/${book.totalChapters} ($pct%)',
+                                                    '${book.format == 'PDF' ? 'Стр.' : 'Гл.'} ${book.lastChapterIndex + 1}/${book.totalChapters} ($pct%)',
                                                     style: const TextStyle(
                                                       fontSize: 11,
                                                       color: Color(0xFFA89E93),
@@ -422,7 +467,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.add),
-              label: Text(_importing ? 'Загрузка...' : 'Добавить книгу'),
+              label: Text(_importing ? 'Распознавание...' : 'Добавить файл'),
             )
           : null,
       bottomNavigationBar: NavigationBar(
@@ -435,7 +480,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           NavigationDestination(
             icon: Icon(Icons.library_books_outlined),
             selectedIcon: Icon(Icons.library_books),
-            label: 'Книги',
+            label: 'Библиотека',
           ),
           NavigationDestination(
             icon: Icon(Icons.bookmarks_outlined),
