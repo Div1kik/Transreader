@@ -295,7 +295,7 @@ class TranslatorService {
       final waitSec = getShortestRateLimitSeconds();
       if (waitSec > 0) {
         throw ModelRateLimitException(
-          model: '${routes.first.provider.name}:${routes.first.model}',
+          model: '${routes.first.provider.name}: ${routes.first.model}',
           retryAfterSeconds: waitSec.clamp(3, 90),
           rawMessage: 'Все подключённые модели временно в лимите',
         );
@@ -308,7 +308,7 @@ class TranslatorService {
     final errorSummary = <String>[];
 
     for (final route in availableRoutes) {
-      final badge = '${route.provider.name} •${route.model}';
+      final badge = '${route.provider.name} • ${route.model}';
       onModelSelected?.call(badge);
 
       try {
@@ -483,7 +483,7 @@ ${jsonEncode(numberedInput)}
           ? '${response.body.substring(0, 140)}...'
           : response.body;
       throw Exception(
-        '${provider.name} (${response.statusCode}):$shortBody',
+        '${provider.name} (${response.statusCode}): $shortBody',
       );
     }
 
