@@ -1,9 +1,23 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
-import 'package:path/path.dart';
+import 'package:path.dart';
 import 'package:sqflite/sqflite.dart';
 import '../models/book_models.dart';
+
+class SearchHit {
+  final int chapterIndex;
+  final String chapterTitle;
+  final int orderIndex;
+  final String snippet;
+
+  const SearchHit({
+    required this.chapterIndex,
+    required this.chapterTitle,
+    required this.orderIndex,
+    required this.snippet,
+  });
+}
 
 class BookDatabase {
   static final BookDatabase instance = BookDatabase._();
@@ -27,9 +41,33 @@ class BookDatabase {
       )
     ''');
 
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS bookmarks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bookId TEXT NOT NULL,
+        chapterIndex INTEGER NOT NULL DEFAULT 0,
+        chapterTitle TEXT NOT NULL DEFAULT '',
+        pageIndex INTEGER NOT NULL DEFAULT 0,
+        quoteText TEXT NOT NULL,
+        noteText TEXT NOT NULL DEFAULT '',
+        colorHex INTEGER NOT NULL DEFAULT 4294956367,
+        createdAt INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
+
     final bookColumns = await db.rawQuery('PRAGMA table_info(books)');
     final bookColNames = bookColumns.map((c) => c['name'].toString()).toSet();
 
+    if (!bookColNames.contains('author')) {
+      await db.execute(
+        'ALTER TABLE books ADD COLUMN author TEXT NOT NULL DEFAULT ""',
+      );
+    }
+    if (!bookColNames.contains('coverBase64')) {
+      await db.execute(
+        'ALTER TABLE books ADD COLUMN coverBase64 TEXT',
+      );
+    }
     if (!bookColNames.contains('lastChapterIndex')) {
       await db.execute(
         'ALTER TABLE books ADD COLUMN lastChapterIndex INTEGER NOT NULL DEFAULT 0',
@@ -61,13 +99,15 @@ class BookDatabase {
     final path = await getDatabaseFilePath();
     _db = await openDatabase(
       path,
-      version: 4,
+      version: 5,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE books (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
+            author TEXT NOT NULL DEFAULT '',
             format TEXT NOT NULL,
+            coverBase64 TEXT,
             totalChapters INTEGER NOT NULL,
             lastChapterIndex INTEGER NOT NULL DEFAULT 0,
             lastPageIndex INTEGER NOT NULL DEFAULT 0,
@@ -256,6 +296,33 @@ class BookDatabase {
     return rows.map((e) => ParagraphItem.fromMap(e)).toList();
   }
 
+  Future<List<SearchHit>> searchInBook(String bookId, String query) async {
+    final clean = query.trim();
+    if (clean.length < 2) return [];
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT p.chapterIndex, c.title AS chapterTitle, p.orderIndex, p.sourceText, p.translatedText
+      FROM paragraphs p
+      LEFT JOIN chapters c ON c.bookId = p.bookId AND c.chapterIndex = p.chapterIndex
+      WHERE p.bookId = ? AND (p.sourceText LIKE ? OR p.translatedText LIKE ?)
+      ORDER BY p.chapterIndex ASC, p.orderIndex ASC
+      LIMIT 60
+    ''', [bookId, '%$clean%', '%$clean%']);
+
+    final lowerQ = clean.toLowerCase();
+    return rows.map((r) {
+      final tr = (r['translatedText'] as String?) ?? '';
+      final src = (r['sourceText'] as String?) ?? '';
+      final chosen = tr.toLowerCase().contains(lowerQ) ? tr : src;
+      return SearchHit(
+        chapterIndex: (r['chapterIndex'] as int?) ?? 0,
+        chapterTitle: (r['chapterTitle'] as String?) ?? 'Глава',
+        orderIndex: (r['orderIndex'] as int?) ?? 0,
+        snippet: chosen,
+      );
+    }).toList();
+  }
+
   Future<void> updateParagraphTranslation(
     int paragraphId,
     String translatedText, {
@@ -314,10 +381,32 @@ class BookDatabase {
   Future<void> deleteBook(String bookId) async {
     final db = await database;
     await db.transaction((txn) async {
+      await txn.delete('bookmarks', where: 'bookId = ?', whereArgs: [bookId]);
       await txn.delete('paragraphs', where: 'bookId = ?', whereArgs: [bookId]);
       await txn.delete('chapters', where: 'bookId = ?', whereArgs: [bookId]);
       await txn.delete('books', where: 'id = ?', whereArgs: [bookId]);
     });
+  }
+
+  Future<void> addBookmark(BookBookmark bookmark) async {
+    final db = await database;
+    await db.insert('bookmarks', bookmark.toMap());
+  }
+
+  Future<List<BookBookmark>> getBookmarksForBook(String bookId) async {
+    final db = await database;
+    final rows = await db.query(
+      'bookmarks',
+      where: 'bookId = ?',
+      whereArgs: [bookId],
+      orderBy: 'chapterIndex ASC, pageIndex ASC, id DESC',
+    );
+    return rows.map((e) => BookBookmark.fromMap(e)).toList();
+  }
+
+  Future<void> deleteBookmark(int id) async {
+    final db = await database;
+    await db.delete('bookmarks', where: 'id = ?', whereArgs: [id]);
   }
 
   Future<void> addDictionaryEntry(DictionaryEntry entry) async {
