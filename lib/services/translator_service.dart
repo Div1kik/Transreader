@@ -133,7 +133,6 @@ class TranslatorService {
     }
   }
 
-  /// Запасной поиск для старых глав (переведённых до появления wordAlignMap)
   Future<String> findCounterpartWordInContext({
     required String tappedWord,
     required String sourceParagraph,
@@ -362,7 +361,7 @@ class TranslatorService {
     final uri = Uri.parse(provider.endpointUrl);
 
     final contextBlock = previousContext.isEmpty
-        ? 'Начало сцены / главы.'
+        ? 'Начало документа / главы.'
         : previousContext.join('\n');
 
     final numberedInput = <String, String>{};
@@ -370,9 +369,24 @@ class TranslatorService {
       numberedInput['$i'] = paragraphs[i];
     }
 
-    final systemPrompt = '''
+    final isTechnical = settings.styleMode == TranslationStyleMode.technical;
+
+    final systemPrompt = isTechnical
+        ? '''
+Ты профессиональный технический переводчик документации, стандартов, спецификаций и деловых отчётов на $targetLanguage язык.
+Твоя задача — выполнить точный, терминологически выверенный и строгий технический перевод И построить для каждого абзаца карту соответствий значащих слов ("align").
+
+Строгие правила:
+1. Соблюдай отраслевую терминологию, стандарты и точные формулировки без художественных вольностей.
+2. Числа, единицы измерения, коды стандартов, артикулы, формулы и аббревиатуры (ASTM, ISO, GOST, MPa, kN, mm и др.) сохраняй без искажений.
+3. Переводи каждый абзац из входного JSON-объекта ("0", "1", ...), не пропуская пункты и не объединяя абзацы.
+4. Для каждого абзаца сформируй объект "align": словарь вида {"слово_из_перевода": "word_from_source"}, связывающий все значащие термины и слова ровно в той словоформе, как они написаны в тексте (без артиклей the, a, an и предлогов).
+5. Ответь СТРОГО валидным JSON-объектом без markdown-обёрток:
+{"items": [{"translation": "перевод абзаца 0", "align": {"испытание": "test", "нагрузка": "load"}}, ...]}
+'''
+        : '''
 Ты опытный литературный переводчик художественной прозы и эпического фэнтези на $targetLanguage язык.
-Твоя задача — сделать живой, естественный, грамотный художественный перевод И построить для каждого абзаца карту соответствий значащих слов ("alignments"), чтобы читатель мог нажать на любое слово в русском или английском тексте и увидеть его точный эквивалент.
+Твоя задача — сделать живой, естественный, грамотный художественный перевод И построить для каждого абзаца карту соответствий значащих слов ("align"), чтобы читатель мог нажать на любое слово в русском или английском тексте и увидеть его точный эквивалент.
 
 Строгие правила качества:
 1. Никакого подстрочника и дословной кальки: перестраивай фразы так, чтобы они звучали естественно по-русски, сохраняя смысл, атмосферу и ритм автора.
@@ -384,7 +398,7 @@ class TranslatorService {
 ''';
 
     final userPrompt = '''
-ПРЕДЫДУЩИЙ КОНТЕКСТ СЦЕНЫ (оригинал для понимания сюжета, родов и имён — не включать в ответ):
+ПРЕДЫДУЩИЙ КОНТЕСТ (оригинал для понимания терминов, родов и имён — не включать в ответ):
 $contextBlock
 
 АБЗАЦЫ ДЛЯ ПЕРЕВОДА И ВЫРАВНИВАНИЯ СЛОВ (ровно ${paragraphs.length} шт.):
@@ -393,7 +407,7 @@ ${jsonEncode(numberedInput)}
 
     final body = jsonEncode({
       'model': model,
-      'temperature': 0.25,
+      'temperature': isTechnical ? 0.1 : 0.25,
       'messages': [
         {'role': 'system', 'content': systemPrompt},
         {'role': 'user', 'content': userPrompt},
@@ -450,7 +464,6 @@ ${jsonEncode(numberedInput)}
     final cleanJson = _extractJsonObject(content);
     final parsedContent = jsonDecode(cleanJson);
 
-    // Поддерживаем как новый формат {"items": [...]}, так и запасной {"translations": [...]}
     final itemsRaw = parsedContent['items'];
     final translationsFallback = parsedContent['translations'];
 
@@ -479,7 +492,6 @@ ${jsonEncode(numberedInput)}
             final cleanK = _cleanTokenKey(k.toString());
             final cleanV = _cleanTokenKey(v.toString());
             if (cleanK.isNotEmpty && cleanV.isNotEmpty) {
-              // Записываем двустороннюю связку (RU -> EN и EN -> RU) для мгновенного поиска за 0 мс
               biMap[cleanK] = cleanV;
               biMap[cleanV] = cleanK;
             }
