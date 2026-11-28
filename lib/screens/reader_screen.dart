@@ -67,6 +67,21 @@ class _ReaderScreenState extends State<ReaderScreen> {
   StreamSubscription<TranslationProgress>? _progressSub;
   Timer? _saveProgressDebounce;
 
+  static const Set<String> _ignoredHelperWords = {
+    'the',
+    'a',
+    'an',
+    'to',
+    'of',
+    'is',
+    'are',
+    'was',
+    'were',
+    'be',
+    'been',
+    'being',
+  };
+
   static const Map<String, List<String>> _pronounHints = {
     'его': ['his', 'him', 'its', 'it'],
     'её': ['her', 'hers', 'its', 'it'],
@@ -976,6 +991,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   int? _findBestMatchToken({
+    required ParagraphItem paragraph,
     required String targetParagraph,
     required String tappedNormWord,
     required String candidateTranslation,
@@ -984,13 +1000,28 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final tokens = _tokenize(targetParagraph);
     if (tokens.isEmpty) return null;
 
+    final alignedFromAi = paragraph.wordAlignMap[tappedNormWord] ??
+        paragraph.wordAlignMap[_stemWord(tappedNormWord)];
+
+    final translatedWords = candidateTranslation
+        .split(RegExp(r'\s+'))
+        .map(_normalizeWord)
+        .where((w) => w.isNotEmpty)
+        .toList();
+
+    final meaningfulTranslated = translatedWords
+        .where((w) => !_ignoredHelperWords.contains(w))
+        .toList();
+
+    final effectiveTranslated = meaningfulTranslated.isNotEmpty
+        ? meaningfulTranslated
+        : translatedWords;
+
     final rawCandidates = <String>[
-      ...candidateTranslation
-          .split(RegExp(r'\s+'))
-          .map(_normalizeWord)
-          .where((w) => w.isNotEmpty),
+      if (alignedFromAi != null && alignedFromAi.isNotEmpty) alignedFromAi,
+      ...effectiveTranslated,
       ...(_pronounHints[tappedNormWord] ?? const []),
-      _transliterateRuToEn(tappedNormWord),
+      if (tappedNormWord.length >= 4) _transliterateRuToEn(tappedNormWord),
     ];
 
     final candidateStems = rawCandidates.map(_stemWord).toList();
@@ -1002,15 +1033,19 @@ class _ReaderScreenState extends State<ReaderScreen> {
     for (int i = 0; i < tokens.length; i++) {
       final normW = _normalizeWord(tokens[i]);
       if (normW.isEmpty) continue;
-      final stemW = _stemWord(normW);
+      if (!_pronounHints.containsKey(tappedNormWord) &&
+          _ignoredHelperWords.contains(normW)) {
+        continue;
+      }
 
+      final stemW = _stemWord(normW);
       final posRatio = i / tokens.length;
       final posPenalty = (posRatio - relativePosition).abs() * 1.2;
 
       for (int cIdx = 0; cIdx < rawCandidates.length; cIdx++) {
         final cand = rawCandidates[cIdx];
         final candStem = candidateStems[cIdx];
-        final candBonus = cIdx == 0 ? 0.35 : 0.0;
+        final candBonus = cIdx == 0 ? 0.5 : 0.0;
 
         if (normW == cand) {
           final score = 12.0 + candBonus - posPenalty;
@@ -1077,6 +1112,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         isOriginalText ? paragraph.translatedText! : paragraph.sourceText;
 
     final instantMatch = _findBestMatchToken(
+      paragraph: paragraph,
       targetParagraph: targetText,
       tappedNormWord: cleanWord,
       candidateTranslation: '',
@@ -1106,6 +1142,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         if (_scrollHighlightOrder != paragraph.orderIndex) return;
 
         final matchedToken = _findBestMatchToken(
+          paragraph: paragraph,
           targetParagraph: targetText,
           tappedNormWord: cleanWord,
           candidateTranslation: candidate,
@@ -1508,7 +1545,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          'Для мгновенной подсветки слов без сети скачайте словарь (~30 МБ)',
+                          'Для мгновенной подсветки старых глав скачайте словарь (~30 МБ)',
                           style: TextStyle(fontSize: 11, color: palette.text),
                         ),
                       ),
