@@ -2,6 +2,11 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:archive/archive.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:pdfx/pdfx.dart' as pdfx;
+import 'package:syncfusion_flutter_pdf/pdf.dart';
 import 'package:xml/xml.dart';
 import '../models/book_models.dart';
 
@@ -21,9 +26,14 @@ class BookParser {
   static Future<ParsedBookBundle> parseFromBytes({
     required Uint8List bytes,
     required String fileName,
+    void Function(String status)? onProgress,
   }) async {
     final lowerName = fileName.toLowerCase();
     final bookId = DateTime.now().microsecondsSinceEpoch.toString();
+
+    if (lowerName.endsWith('.pdf')) {
+      return _parsePdf(bytes, fileName, bookId, onProgress: onProgress);
+    }
 
     if (lowerName.endsWith('.epub')) {
       return _parseEpub(bytes, fileName, bookId);
@@ -31,19 +41,261 @@ class BookParser {
 
     final rawString = _decodeBytesSmart(bytes);
 
-    if (lowerName.endsWith('.fb2') ||
-        rawString.contains('<FictionBook')) {
+    if (lowerName.endsWith('.fb2') || rawString.contains('<FictionBook')) {
       return _parseFb2(rawString, fileName, bookId);
     } else {
       return _parseTxt(rawString, fileName, bookId);
     }
   }
 
-  static Future<ParsedBookBundle> parseFile(String filePath) async {
+  static Future<ParsedBookBundle> parseFile(
+    String filePath, {
+    void Function(String status)? onProgress,
+  }) async {
     final file = File(filePath);
     final bytes = await file.readAsBytes();
     final fileName = file.uri.pathSegments.last;
-    return parseFromBytes(bytes: bytes, fileName: fileName);
+    return parseFromBytes(
+      bytes: bytes,
+      fileName: fileName,
+      onProgress: onProgress,
+    );
+  }
+
+  /// Гибридный парсер PDF:
+  /// 1) Пытается извлечь встроенный цифровой текст со страницы
+  /// 2) Если страница является сканом/картинкой — рендерит её и прогоняет через офлайн ML Kit OCR
+  /// 3) Первую страницу сохраняет как обложку документа
+  static Future<ParsedBookBundle> _parsePdf(
+    Uint8List bytes,
+    String fileName,
+    String bookId, {
+    void Function(String status)? onProgress,
+  }) async {
+    final cleanTitle = fileName.replaceAll(
+      RegExp(r'\.pdf$', caseSensitive: false),
+      '',
+    );
+
+    final chapters = <Chapter>[];
+    final paragraphs = <ParagraphItem>[];
+    String? coverBase64;
+    String author = '';
+
+    final PdfDocument syncDoc = PdfDocument(inputBytes: bytes);
+    final int totalPages = syncDoc.pages.count;
+
+    if (syncDoc.documentInformation.author.trim().isNotEmpty) {
+      author = syncDoc.documentInformation.author.trim();
+    }
+    final metaTitle = syncDoc.documentInformation.title.trim();
+    final effectiveTitle = metaTitle.isNotEmpty ? metaTitle : cleanTitle;
+
+    final PdfTextExtractor extractor = PdfTextExtractor(syncDoc);
+
+    pdfx.PdfDocument? renderDoc;
+    TextRecognizer? ocrRecognizer;
+    Directory? tempDir;
+
+    try {
+      renderDoc = await pdfx.PdfDocument.openData(bytes);
+
+      // Генерируем обложку из 1-й страницы PDF
+      if (totalPages > 0) {
+        try {
+          final firstPage = await renderDoc.getPage(1);
+          final pageImg = await firstPage.render(
+            width: 320,
+            height: (320 * (firstPage.height / firstPage.width)).roundToDouble(),
+            format: pdfx.PdfPageImageFormat.jpeg,
+            quality: 80,
+          );
+          await firstPage.close();
+          if (pageImg != null && pageImg.bytes.length < 1200000) {
+            coverBase64 = base64Encode(pageImg.bytes);
+          }
+        } catch (_) {}
+      }
+
+      int chapterIdx = 0;
+
+      for (int pageIdx = 0; pageIdx < totalPages; pageIdx++) {
+        onProgress?.call('Обработка страницы ${pageIdx + 1} из $totalPages...');
+
+        String pageRawText = '';
+        try {
+          pageRawText = extractor.extractText(
+            startPageIndex: pageIdx,
+            endPageIndex: pageIdx,
+          );
+        } catch (_) {}
+
+        final meaningfulChars =
+            pageRawText.replaceAll(RegExp(r'\s+'), '').length;
+        bool usedOcr = false;
+
+        // Если цифрового текста на странице меньше 25 символов — страница отсканирована, запускаем OCR
+        if (meaningfulChars < 25) {
+          onProgress?.call(
+            'OCR-транскрибация скана: стр. ${pageIdx + 1} из $totalPages...',
+          );
+          try {
+            ocrRecognizer ??=
+                TextRecognizer(script: TextRecognitionScript.latin);
+            tempDir ??= await getTemporaryDirectory();
+
+            final pdfPage = await renderDoc.getPage(pageIdx + 1);
+            final img = await pdfPage.render(
+              width: pdfPage.width * 2.0,
+              height: pdfPage.height * 2.0,
+              format: pdfx.PdfPageImageFormat.png,
+            );
+            await pdfPage.close();
+
+            if (img != null) {
+              final tmpFile = File(
+                p.join(tempDir.path, 'ocr_${bookId}_$pageIdx.png'),
+              );
+              await tmpFile.writeAsBytes(img.bytes, flush: true);
+              final inputImage = InputImage.fromFilePath(tmpFile.path);
+              final recognized = await ocrRecognizer.processImage(inputImage);
+              pageRawText = recognized.text;
+              usedOcr = true;
+              if (await tmpFile.exists()) {
+                await tmpFile.delete();
+              }
+            }
+          } catch (_) {}
+        }
+
+        final pageParagraphs = _splitPdfPageIntoParagraphs(pageRawText);
+        if (pageParagraphs.isEmpty) continue;
+
+        final chapterLabel = usedOcr
+            ? 'Страница ${pageIdx + 1} [OCR]'
+            : 'Страница ${pageIdx + 1}';
+
+        chapters.add(
+          Chapter(
+            bookId: bookId,
+            index: chapterIdx,
+            title: chapterLabel,
+            status: ChapterStatus.pending,
+          ),
+        );
+
+        for (int i = 0; i < pageParagraphs.length; i++) {
+          paragraphs.add(
+            ParagraphItem(
+              bookId: bookId,
+              chapterIndex: chapterIdx,
+              orderIndex: i,
+              sourceText: pageParagraphs[i],
+            ),
+          );
+        }
+
+        chapterIdx++;
+      }
+    } finally {
+      syncDoc.dispose();
+      await renderDoc?.close();
+      await ocrRecognizer?.close();
+    }
+
+    if (chapters.isEmpty) {
+      chapters.add(
+        Chapter(
+          bookId: bookId,
+          index: 0,
+          title: 'Страница 1',
+          status: ChapterStatus.pending,
+        ),
+      );
+      paragraphs.add(
+        ParagraphItem(
+          bookId: bookId,
+          chapterIndex: 0,
+          orderIndex: 0,
+          sourceText: 'Не удалось распознать текст в данном PDF-файле.',
+        ),
+      );
+    }
+
+    return ParsedBookBundle(
+      book: Book(
+        id: bookId,
+        title: effectiveTitle,
+        author: author,
+        format: 'PDF',
+        coverBase64: coverBase64,
+        totalChapters: chapters.length,
+      ),
+      chapters: chapters,
+      paragraphs: paragraphs,
+    );
+  }
+
+  /// Аккуратно склеивает разорванные переносами строки PDF обратно в связные абзацы
+  static List<String> _splitPdfPageIntoParagraphs(String raw) {
+    final cleaned = raw.replaceAll('\r\n', '\n').trim();
+    if (cleaned.isEmpty) return const [];
+
+    final rawBlocks = cleaned.split(RegExp(r'\n\s*\n'));
+    final result = <String>[];
+
+    for (final block in rawBlocks) {
+      final lines = block
+          .split('\n')
+          .map((l) => l.trim())
+          .where((l) => l.isNotEmpty)
+          .toList();
+      if (lines.isEmpty) continue;
+
+      final sb = StringBuffer();
+      for (int i = 0; i < lines.length; i++) {
+        final line = lines[i];
+        if (i == 0) {
+          sb.write(line);
+        } else {
+          final prev = sb.toString();
+          if (prev.endsWith('-') && prev.length > 2) {
+            // Склеиваем слово, перенесённое через дефис на новую строку
+            final withoutHyphen = prev.substring(0, prev.length - 1);
+            sb
+              ..clear()
+              ..write('$withoutHyphen$line');
+          } else {
+            sb.write(' $line');
+          }
+        }
+      }
+
+      final merged = sb.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
+      if (merged.isNotEmpty) {
+        result.add(merged);
+      }
+    }
+
+    // Если PDF не содержал двойных переносов, делим по строкам, оканчивающимся на точку
+    if (result.length == 1 && result.first.length > 900) {
+      final sentences = result.first.split(RegExp(r'(?<=[.!?])\s+'));
+      final chunked = <String>[];
+      var current = StringBuffer();
+      for (final s in sentences) {
+        if (current.length + s.length > 420 && current.isNotEmpty) {
+          chunked.add(current.toString().trim());
+          current = StringBuffer();
+        }
+        current.write('$s ');
+      }
+      if (current.isNotEmpty) {
+        chunked.add(current.toString().trim());
+      }
+      return chunked;
+    }
+
+    return result;
   }
 
   static String _decodeBytesSmart(Uint8List bytes) {
@@ -84,7 +336,6 @@ class BookParser {
     return buffer.toString();
   }
 
-  /// Полноценный парсер EPUB (извлекает название, автора, обложку и главы из OPF/spine)
   static ParsedBookBundle _parseEpub(
     Uint8List bytes,
     String fileName,
@@ -107,7 +358,6 @@ class BookParser {
     final chapters = <Chapter>[];
     final paragraphs = <ParagraphItem>[];
 
-    // 1. Ищем путь к content.opf через META-INF/container.xml
     String? opfPath;
     final containerFile = fileMap['META-INF/container.xml'];
     if (containerFile != null) {
@@ -159,13 +409,17 @@ class BookParser {
         String? coverHref;
         String? coverId;
 
-        for (final meta in opfXml.findAllElements('*').where((e) => e.name.local == 'meta')) {
+        for (final meta in opfXml
+            .findAllElements('*')
+            .where((e) => e.name.local == 'meta')) {
           if (meta.getAttribute('name') == 'cover') {
             coverId = meta.getAttribute('content');
           }
         }
 
-        for (final item in opfXml.findAllElements('*').where((e) => e.name.local == 'item')) {
+        for (final item in opfXml
+            .findAllElements('*')
+            .where((e) => e.name.local == 'item')) {
           final id = item.getAttribute('id') ?? '';
           final href = item.getAttribute('href') ?? '';
           final props = item.getAttribute('properties') ?? '';
@@ -193,8 +447,9 @@ class BookParser {
           }
         }
 
-        for (final itemref
-            in opfXml.findAllElements('*').where((e) => e.name.local == 'itemref')) {
+        for (final itemref in opfXml
+            .findAllElements('*')
+            .where((e) => e.name.local == 'itemref')) {
           final idref = itemref.getAttribute('idref');
           if (idref != null && manifestMap.containsKey(idref)) {
             spineHrefs.add('$baseDir${manifestMap[idref]}');
@@ -238,8 +493,9 @@ class BookParser {
                 e.name.local == 'h2' ||
                 e.name.local == 'h3')
             .firstOrNull;
-        String chTitle = headingEl?.innerText.replaceAll(RegExp(r'\s+'), ' ').trim() ??
-            'Глава ${chIdx + 1}';
+        String chTitle =
+            headingEl?.innerText.replaceAll(RegExp(r'\s+'), ' ').trim() ??
+                'Глава ${chIdx + 1}';
         if (chTitle.isEmpty) chTitle = 'Глава ${chIdx + 1}';
 
         final pNodes = doc
@@ -314,21 +570,29 @@ class BookParser {
     final document = XmlDocument.parse(xmlContent);
 
     final titleElement = document.findAllElements('book-title').firstOrNull;
-    final bookTitle = (titleElement != null && titleElement.innerText.trim().isNotEmpty)
-        ? titleElement.innerText.trim()
-        : fileName.replaceAll(RegExp(r'\.fb2$', caseSensitive: false), '');
+    final bookTitle =
+        (titleElement != null && titleElement.innerText.trim().isNotEmpty)
+            ? titleElement.innerText.trim()
+            : fileName.replaceAll(RegExp(r'\.fb2$', caseSensitive: false), '');
 
     String author = '';
     final authorEl = document.findAllElements('author').firstOrNull;
     if (authorEl != null) {
-      final first = authorEl.findElements('first-name').firstOrNull?.innerText.trim() ?? '';
-      final last = authorEl.findElements('last-name').firstOrNull?.innerText.trim() ?? '';
+      final first =
+          authorEl.findElements('first-name').firstOrNull?.innerText.trim() ??
+              '';
+      final last =
+          authorEl.findElements('last-name').firstOrNull?.innerText.trim() ??
+              '';
       author = '$first $last'.trim();
     }
 
-    // Извлекаем обложку из <binary id="cover.jpg">
     String? coverBase64;
-    final coverImgEl = document.findAllElements('coverpage').firstOrNull?.findAllElements('image').firstOrNull;
+    final coverImgEl = document
+        .findAllElements('coverpage')
+        .firstOrNull
+        ?.findAllElements('image')
+        .firstOrNull;
     String? targetBinaryId;
     if (coverImgEl != null) {
       for (final attr in coverImgEl.attributes) {
@@ -557,7 +821,8 @@ class BookParser {
 
     int chapterIdx = 0;
     for (int i = 0; i < allTexts.length; i += chunkSize) {
-      final end = (i + chunkSize < allTexts.length) ? i + chunkSize : allTexts.length;
+      final end =
+          (i + chunkSize < allTexts.length) ? i + chunkSize : allTexts.length;
       final slice = allTexts.sublist(i, end);
 
       chapters.add(
