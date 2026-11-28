@@ -123,6 +123,9 @@ class TranslatorService {
     }
   }
 
+  /// Трёхуровневый поиск парного слова в билингве:
+  /// 1) Мгновенный локальный ML Kit (~10 мс, если модель скачана)
+  /// 2) Быстрый страховочный запрос к первому живому ИИ-провайдеру (таймаут 3.5 сек), если ML Kit не скачан
   Future<String> findCounterpartWordInContext({
     required String tappedWord,
     required String sourceParagraph,
@@ -133,9 +136,32 @@ class TranslatorService {
     if (cleanWord.isEmpty) return '';
 
     final isRussianTap = _isCyrillic(cleanWord);
+    final targetLang = isRussianTap ? 'English' : settings.targetLanguage;
 
-    if (settings.engineMode != TranslationEngineMode.offlineLocal &&
-        settings.hasAnyOnlineKey) {
+    // Уровень 2: проверяем, скачан ли локальный словарь ML Kit
+    final mlKitReady = await OfflineTranslatorService.instance.isPairDownloaded(
+      targetLanguage: settings.targetLanguage,
+    );
+
+    if (mlKitReady) {
+      try {
+        final translated = await OfflineTranslatorService.instance
+            .translateText(
+              cleanWord,
+              source: isRussianTap
+                  ? TranslateLanguage.russian
+                  : TranslateLanguage.english,
+              targetLanguage: targetLang,
+            )
+            .timeout(const Duration(milliseconds: 350));
+        if (translated.trim().isNotEmpty) {
+          return translated.trim();
+        }
+      } catch (_) {}
+    }
+
+    // Уровень 3: если ML Kit не скачан — быстрый фолбэк на первый доступный онлайн-провайдер (таймаут 3.5 сек)
+    if (settings.hasAnyOnlineKey) {
       final providers = settings.effectiveProviders;
       for (final provider in providers) {
         for (final model in provider.models) {
@@ -154,17 +180,17 @@ class TranslatorService {
                       {
                         'role': 'system',
                         'content':
-                            'You are a bilingual word-alignment engine. Given a tapped word in a source paragraph (at roughly $pct% through the text) and its translated counterpart paragraph, output ONLY the single exact matching word from the target paragraph. No punctuation, no explanations, just that one word.',
+                            'Given a tapped word in a source paragraph (at ~$pct% of text) and its translated target paragraph, output ONLY the single exact matching word copied verbatim from the target paragraph. No punctuation or explanation.',
                       },
                       {
                         'role': 'user',
                         'content':
-                            'Tapped word: "$cleanWord"\nSource paragraph: "$sourceParagraph"\nTarget paragraph: "$targetParagraph"\nExact matching word from Target paragraph:',
+                            'Tapped: "$cleanWord"\nSource: "$sourceParagraph"\nTarget: "$targetParagraph"\nExact word from Target:',
                       },
                     ],
                   }),
                 )
-                .timeout(const Duration(seconds: 7));
+                .timeout(const Duration(milliseconds: 3500));
 
             if (response.statusCode >= 200 && response.statusCode < 300) {
               final decoded = jsonDecode(utf8.decode(response.bodyBytes));
@@ -173,29 +199,31 @@ class TranslatorService {
                       '';
               final cleanedReply = rawReply
                   .trim()
-                  .replaceAll(RegExp(r'^["«“„]+|["»”„.,!?;:]+$'), '');
+                  .split(RegExp(r'\s+'))
+                  .first
+                  .replaceAll(
+                    RegExp(r'^["«“„()\[\]]+|["»”„.,!?;:()\[\]]+$'),
+                    '',
+                  );
               if (cleanedReply.isNotEmpty) {
                 return cleanedReply;
               }
+            } else if (response.statusCode == 400 ||
+                response.statusCode == 401 ||
+                response.statusCode == 403 ||
+                response.statusCode == 404) {
+              _routeErrorCooldownUntil[_routeKey(provider, model)] =
+                  DateTime.now().add(const Duration(seconds: 30));
             }
           } catch (_) {
+            // Пробуем следующую живую модель
             continue;
           }
         }
       }
     }
 
-    try {
-      return await OfflineTranslatorService.instance.translateText(
-        cleanWord,
-        source: isRussianTap
-            ? TranslateLanguage.russian
-            : TranslateLanguage.english,
-        targetLanguage: isRussianTap ? 'English' : settings.targetLanguage,
-      );
-    } catch (_) {
-      return '';
-    }
+    return '';
   }
 
   Future<List<String>> _translateWithOfflineMlKit(
@@ -267,7 +295,7 @@ class TranslatorService {
       final waitSec = getShortestRateLimitSeconds();
       if (waitSec > 0) {
         throw ModelRateLimitException(
-          model: '${routes.first.provider.name}: ${routes.first.model}',
+          model: '${routes.first.provider.name}:${routes.first.model}',
           retryAfterSeconds: waitSec.clamp(3, 90),
           rawMessage: 'Все подключённые модели временно в лимите',
         );
@@ -280,7 +308,7 @@ class TranslatorService {
     final errorSummary = <String>[];
 
     for (final route in availableRoutes) {
-      final badge = '${route.provider.name} • ${route.model}';
+      final badge = '${route.provider.name} •${route.model}';
       onModelSelected?.call(badge);
 
       try {
@@ -455,7 +483,7 @@ ${jsonEncode(numberedInput)}
           ? '${response.body.substring(0, 140)}...'
           : response.body;
       throw Exception(
-        '${provider.name} (${response.statusCode}): $shortBody',
+        '${provider.name} (${response.statusCode}):$shortBody',
       );
     }
 
