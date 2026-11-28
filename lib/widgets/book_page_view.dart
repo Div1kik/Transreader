@@ -76,6 +76,21 @@ class _BookPageViewState extends State<BookPageView>
   int? _highlightedTranslatedTokenIndex;
   bool _wordTapHandled = false;
 
+  static const Set<String> _ignoredHelperWords = {
+    'the',
+    'a',
+    'an',
+    'to',
+    'of',
+    'is',
+    'are',
+    'was',
+    'were',
+    'be',
+    'been',
+    'being',
+  };
+
   static const Map<String, List<String>> _pronounHints = {
     'его': ['his', 'him', 'its', 'it'],
     'её': ['her', 'hers', 'its', 'it'],
@@ -316,10 +331,39 @@ class _BookPageViewState extends State<BookPageView>
   String _normalizeWord(String raw) {
     return raw
         .toLowerCase()
+        .replaceAll('ё', 'е')
         .replaceAll(RegExp(r"[^\p{L}\p{N}'’-]", unicode: true), '');
   }
 
+  String _stemWord(String w) {
+    if (w.length <= 3) return w;
+    final stripped = w.replaceFirst(
+      RegExp(
+        r'(ами|ями|ому|ему|ого|его|ыми|ими|ться|тся|ешь|ете|ишь|ите|ать|ять|ить|еть|уть|ая|яя|ое|ее|ые|ие|ый|ий|ой|ах|ях|ом|ем|ам|ям|ов|ев|ей|ий|ую|юю|ing|ed|es|ly|er|est|s|а|я|о|е|у|ю|ы|и|ь)$',
+      ),
+      '',
+    );
+    return stripped.length >= 3 ? stripped : w;
+  }
+
+  String _transliterateRuToEn(String ru) {
+    const map = {
+      'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e',
+      'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l',
+      'м': 'm', 'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r', 'с': 's',
+      'т': 't', 'у': 'u', 'ф': 'f', 'х': 'h', 'ц': 'ts', 'ч': 'ch',
+      'ш': 'sh', 'щ': 'sch', 'ы': 'y', 'э': 'e', 'ю': 'yu', 'я': 'ya',
+    };
+    final sb = StringBuffer();
+    for (int i = 0; i < ru.length; i++) {
+      final ch = ru[i];
+      sb.write(map[ch] ?? ch);
+    }
+    return sb.toString();
+  }
+
   int? _findBestMatchingTokenIndex({
+    required ParagraphItem paragraph,
     required String targetParagraph,
     required String tappedNormWord,
     required String candidateTranslation,
@@ -328,15 +372,33 @@ class _BookPageViewState extends State<BookPageView>
     final tokens = _tokenize(targetParagraph);
     if (tokens.isEmpty) return null;
 
-    final candidates = <String>[
-      ...candidateTranslation
-          .split(RegExp(r'\s+'))
-          .map(_normalizeWord)
-          .where((w) => w.isNotEmpty),
+    // 1. Приоритет №1: прямая карта выравнивания от ИИ-переводчика (0 мс, 100% точность художественного текста)
+    final alignedFromAi = paragraph.wordAlignMap[tappedNormWord] ??
+        paragraph.wordAlignMap[_stemWord(tappedNormWord)];
+
+    final translatedWords = candidateTranslation
+        .split(RegExp(r'\s+'))
+        .map(_normalizeWord)
+        .where((w) => w.isNotEmpty)
+        .toList();
+
+    final meaningfulTranslated = translatedWords
+        .where((w) => !_ignoredHelperWords.contains(w))
+        .toList();
+
+    final effectiveTranslated = meaningfulTranslated.isNotEmpty
+        ? meaningfulTranslated
+        : translatedWords;
+
+    final rawCandidates = <String>[
+      if (alignedFromAi != null && alignedFromAi.isNotEmpty) alignedFromAi,
+      ...effectiveTranslated,
       ...(_pronounHints[tappedNormWord] ?? const []),
+      if (tappedNormWord.length >= 4) _transliterateRuToEn(tappedNormWord),
     ];
 
-    if (candidates.isEmpty) return null;
+    final candidateStems = rawCandidates.map(_stemWord).toList();
+    if (rawCandidates.isEmpty) return null;
 
     int? bestTokenIdx;
     double bestScore = -1.0;
@@ -344,31 +406,44 @@ class _BookPageViewState extends State<BookPageView>
     for (int i = 0; i < tokens.length; i++) {
       final normW = _normalizeWord(tokens[i]);
       if (normW.isEmpty) continue;
+      if (!_pronounHints.containsKey(tappedNormWord) &&
+          _ignoredHelperWords.contains(normW)) {
+        continue;
+      }
 
+      final stemW = _stemWord(normW);
       final posRatio = i / tokens.length;
-      final posPenalty = (posRatio - relativePosition).abs() * 1.4;
+      final posPenalty = (posRatio - relativePosition).abs() * 1.2;
 
-      for (int cIdx = 0; cIdx < candidates.length; cIdx++) {
-        final cand = candidates[cIdx];
-        final candBonus = cIdx == 0 ? 0.3 : 0.0;
+      for (int cIdx = 0; cIdx < rawCandidates.length; cIdx++) {
+        final cand = rawCandidates[cIdx];
+        final candStem = candidateStems[cIdx];
+        final candBonus = cIdx == 0 ? 0.5 : 0.0;
 
         if (normW == cand) {
-          final score = 10.0 + candBonus - posPenalty;
+          final score = 12.0 + candBonus - posPenalty;
+          if (score > bestScore) {
+            bestScore = score;
+            bestTokenIdx = i;
+          }
+        } else if (stemW.length >= 3 && stemW == candStem) {
+          final score = 9.5 + candBonus - posPenalty;
           if (score > bestScore) {
             bestScore = score;
             bestTokenIdx = i;
           }
         } else {
-          final minLen = math.min(normW.length, cand.length);
+          final minLen = math.min(stemW.length, candStem.length);
           if (minLen >= 3) {
             int commonPrefix = 0;
             while (commonPrefix < minLen &&
-                normW[commonPrefix] == cand[commonPrefix]) {
+                stemW[commonPrefix] == candStem[commonPrefix]) {
               commonPrefix++;
             }
-            final ratio = commonPrefix / math.max(normW.length, cand.length);
-            if (ratio >= 0.58) {
-              final score = ratio * 6.0 + candBonus - posPenalty;
+            final ratio =
+                commonPrefix / math.max(stemW.length, candStem.length);
+            if (ratio >= 0.55) {
+              final score = ratio * 6.5 + candBonus - posPenalty;
               if (score > bestScore) {
                 bestScore = score;
                 bestTokenIdx = i;
@@ -406,49 +481,62 @@ class _BookPageViewState extends State<BookPageView>
       return;
     }
 
-    setState(() {
-      _highlightedParagraphOrder = paragraph.orderIndex;
-      if (tappedInOriginal) {
-        _highlightedSourceTokenIndex = tokenIndex;
-        _highlightedTranslatedTokenIndex = null;
-      } else {
-        _highlightedTranslatedTokenIndex = tokenIndex;
-        _highlightedSourceTokenIndex = null;
-      }
-    });
-
     final sourceText =
         tappedInOriginal ? paragraph.sourceText : paragraph.translatedText!;
     final targetText =
         tappedInOriginal ? paragraph.translatedText! : paragraph.sourceText;
 
-    try {
-      final candidate = await widget.onLookupWordInContext(
-        tappedWord: cleanWord,
-        sourceParagraph: sourceText,
-        targetParagraph: targetText,
-        relativePosition: relativePosition,
-      );
-      if (!mounted) return;
-      if (_highlightedParagraphOrder != paragraph.orderIndex) return;
+    // Мгновенный поиск по встроенной карте выравнивания ИИ + словарю местоимений + транслитерации (0 мс!)
+    int? instantMatchIdx = _findBestMatchingTokenIndex(
+      paragraph: paragraph,
+      targetParagraph: targetText,
+      tappedNormWord: cleanWord,
+      candidateTranslation: '',
+      relativePosition: relativePosition,
+    );
 
-      final matchedTokenIdx = _findBestMatchingTokenIndex(
-        targetParagraph: targetText,
-        tappedNormWord: cleanWord,
-        candidateTranslation: candidate,
-        relativePosition: relativePosition,
-      );
-
-      if (matchedTokenIdx != null) {
-        setState(() {
-          if (tappedInOriginal) {
-            _highlightedTranslatedTokenIndex = matchedTokenIdx;
-          } else {
-            _highlightedSourceTokenIndex = matchedTokenIdx;
-          }
-        });
+    setState(() {
+      _highlightedParagraphOrder = paragraph.orderIndex;
+      if (tappedInOriginal) {
+        _highlightedSourceTokenIndex = tokenIndex;
+        _highlightedTranslatedTokenIndex = instantMatchIdx;
+      } else {
+        _highlightedTranslatedTokenIndex = tokenIndex;
+        _highlightedSourceTokenIndex = instantMatchIdx;
       }
-    } catch (_) {}
+    });
+
+    // Запасной локальный ML Kit только для старых глав, переведённых без wordAlignMap
+    if (instantMatchIdx == null) {
+      try {
+        final candidate = await widget.onLookupWordInContext(
+          tappedWord: cleanWord,
+          sourceParagraph: sourceText,
+          targetParagraph: targetText,
+          relativePosition: relativePosition,
+        );
+        if (!mounted) return;
+        if (_highlightedParagraphOrder != paragraph.orderIndex) return;
+
+        final matchedTokenIdx = _findBestMatchingTokenIndex(
+          paragraph: paragraph,
+          targetParagraph: targetText,
+          tappedNormWord: cleanWord,
+          candidateTranslation: candidate,
+          relativePosition: relativePosition,
+        );
+
+        if (matchedTokenIdx != null) {
+          setState(() {
+            if (tappedInOriginal) {
+              _highlightedTranslatedTokenIndex = matchedTokenIdx;
+            } else {
+              _highlightedSourceTokenIndex = matchedTokenIdx;
+            }
+          });
+        }
+      } catch (_) {}
+    }
   }
 
   Widget _buildInteractiveBilingualText({
@@ -904,8 +992,6 @@ class _BookPageViewState extends State<BookPageView>
             final localDx = event.localPosition.dx;
             final w = size.width;
 
-            // Ждём 30 мс: если тап попал по слову в билингве, _wordTapHandled станет true
-            // и сработает подсветка слова, а не перелистывание / скрытие панели
             Future.delayed(const Duration(milliseconds: 30), () {
               if (!mounted || _wordTapHandled) return;
               if (localDx < w * 0.20) {
