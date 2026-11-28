@@ -82,7 +82,7 @@ class TranslationQueueController {
   TranslationProgress get currentProgress => _current;
 
   bool _cancelRequested = false;
-  static const int batchSize = 6;
+  static const int batchSize = 5;
 
   TranslationQueueController({
     required this.db,
@@ -240,7 +240,6 @@ class TranslationQueueController {
           final batch = untranslated.skip(i).take(batchSize).toList();
           final firstOrder = batch.first.orderIndex;
 
-          // Передаём оригинал предыдущих абзацев, чтобы старые ошибки перевода не портили контекст
           final contextStart = (firstOrder - 3).clamp(0, paragraphs.length);
           final previousContext = paragraphs
               .sublist(contextStart, firstOrder)
@@ -248,7 +247,7 @@ class TranslationQueueController {
               .toList();
 
           try {
-            final translations = await translator.translateBatch(
+            final outputs = await translator.translateBatchWithAlignments(
               paragraphs: batch.map((p) => p.sourceText).toList(),
               previousContext: previousContext,
               targetLanguage: targetLanguage,
@@ -260,7 +259,11 @@ class TranslationQueueController {
             for (int j = 0; j < batch.length; j++) {
               final item = batch[j];
               if (item.id != null) {
-                await db.updateParagraphTranslation(item.id!, translations[j]);
+                await db.updateParagraphTranslation(
+                  item.id!,
+                  outputs[j].translation,
+                  wordAlignMap: outputs[j].wordAlignMap,
+                );
               }
             }
 
