@@ -10,7 +10,9 @@ enum ChapterStatus {
 class Book {
   final String id;
   final String title;
+  final String author;
   final String format;
+  final String? coverBase64;
   final int totalChapters;
   final int lastChapterIndex;
   final int lastPageIndex;
@@ -19,17 +21,26 @@ class Book {
   const Book({
     required this.id,
     required this.title,
+    this.author = '',
     required this.format,
+    this.coverBase64,
     required this.totalChapters,
     this.lastChapterIndex = 0,
     this.lastPageIndex = 0,
     this.lastScrollOffset = 0.0,
   });
 
+  double get readingProgressPercent {
+    if (totalChapters <= 0) return 0.0;
+    return ((lastChapterIndex + 1) / totalChapters).clamp(0.0, 1.0);
+  }
+
   Book copyWith({
     String? id,
     String? title,
+    String? author,
     String? format,
+    String? coverBase64,
     int? totalChapters,
     int? lastChapterIndex,
     int? lastPageIndex,
@@ -38,7 +49,9 @@ class Book {
     return Book(
       id: id ?? this.id,
       title: title ?? this.title,
+      author: author ?? this.author,
       format: format ?? this.format,
+      coverBase64: coverBase64 ?? this.coverBase64,
       totalChapters: totalChapters ?? this.totalChapters,
       lastChapterIndex: lastChapterIndex ?? this.lastChapterIndex,
       lastPageIndex: lastPageIndex ?? this.lastPageIndex,
@@ -50,7 +63,9 @@ class Book {
     return {
       'id': id,
       'title': title,
+      'author': author,
       'format': format,
+      'coverBase64': coverBase64,
       'totalChapters': totalChapters,
       'lastChapterIndex': lastChapterIndex,
       'lastPageIndex': lastPageIndex,
@@ -62,7 +77,9 @@ class Book {
     return Book(
       id: map['id'] as String,
       title: map['title'] as String,
+      author: (map['author'] as String?) ?? '',
       format: map['format'] as String,
+      coverBase64: map['coverBase64'] as String?,
       totalChapters: map['totalChapters'] as int,
       lastChapterIndex: (map['lastChapterIndex'] as int?) ?? 0,
       lastPageIndex: (map['lastPageIndex'] as int?) ?? 0,
@@ -199,6 +216,58 @@ class DictionaryEntry {
       sourceText: map['sourceText'] as String,
       translatedText: map['translatedText'] as String,
       bookTitle: (map['bookTitle'] as String?) ?? '',
+      createdAt: (map['createdAt'] as int?) ?? 0,
+    );
+  }
+}
+
+class BookBookmark {
+  final int? id;
+  final String bookId;
+  final int chapterIndex;
+  final String chapterTitle;
+  final int pageIndex;
+  final String quoteText;
+  final String noteText;
+  final int colorHex;
+  final int createdAt;
+
+  const BookBookmark({
+    this.id,
+    required this.bookId,
+    required this.chapterIndex,
+    required this.chapterTitle,
+    this.pageIndex = 0,
+    required this.quoteText,
+    this.noteText = '',
+    this.colorHex = 0xFFFFD54F,
+    required this.createdAt,
+  });
+
+  Map<String, dynamic> toMap() {
+    return {
+      if (id != null) 'id': id,
+      'bookId': bookId,
+      'chapterIndex': chapterIndex,
+      'chapterTitle': chapterTitle,
+      'pageIndex': pageIndex,
+      'quoteText': quoteText,
+      'noteText': noteText,
+      'colorHex': colorHex,
+      'createdAt': createdAt,
+    };
+  }
+
+  factory BookBookmark.fromMap(Map<String, dynamic> map) {
+    return BookBookmark(
+      id: map['id'] as int?,
+      bookId: map['bookId'] as String,
+      chapterIndex: (map['chapterIndex'] as int?) ?? 0,
+      chapterTitle: (map['chapterTitle'] as String?) ?? '',
+      pageIndex: (map['pageIndex'] as int?) ?? 0,
+      quoteText: (map['quoteText'] as String?) ?? '',
+      noteText: (map['noteText'] as String?) ?? '',
+      colorHex: (map['colorHex'] as int?) ?? 0xFFFFD54F,
       createdAt: (map['createdAt'] as int?) ?? 0,
     );
   }
