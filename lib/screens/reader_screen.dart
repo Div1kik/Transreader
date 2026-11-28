@@ -38,6 +38,7 @@ class ReaderScreen extends StatefulWidget {
 class _ReaderScreenState extends State<ReaderScreen> {
   List<Chapter> _chapters = [];
   List<ParagraphItem> _paragraphs = [];
+  List<BookBookmark> _bookmarks = [];
   int _currentChapterIndex = 0;
   int _currentPageInChapter = 0;
   double _currentScrollOffset = 0.0;
@@ -48,9 +49,15 @@ class _ReaderScreenState extends State<ReaderScreen> {
   bool _mlKitModelReady = true;
   bool _downloadingDictInReader = false;
 
+  // Затемнение экрана (регулируется свайпом по левому краю)
+  double _dimOverlay = 0.0;
+  bool _showBrightnessHud = false;
+  Timer? _brightnessHudTimer;
+
   late TranslatorSettings _settings;
   late final ScrollController _scrollController;
   late final TextEditingController _chaptersAheadController;
+  final FocusNode _keyboardFocusNode = FocusNode();
 
   final Map<String, String> _wordLookupCache = {};
 
@@ -169,6 +176,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final dictReady = await OfflineTranslatorService.instance.isPairDownloaded(
       targetLanguage: _settings.targetLanguage,
     );
+    await _refreshBookmarks();
     if (mounted) {
       setState(() {
         _appearance = savedAppearance;
@@ -190,6 +198,125 @@ class _ReaderScreenState extends State<ReaderScreen> {
       startScrollOffset: startScroll,
       saveProgress: false,
     );
+  }
+
+  Future<void> _refreshBookmarks() async {
+    final list = await BookDatabase.instance.getBookmarksForBook(widget.book.id);
+    if (mounted) {
+      setState(() => _bookmarks = list);
+    }
+  }
+
+  Future<void> _addQuickBookmark() async {
+    final chapterTitle = _chapters.isNotEmpty
+        ? _chapters[_currentChapterIndex].title
+        : 'Глава ${_currentChapterIndex + 1}';
+
+    final preview = _paragraphs.isNotEmpty
+        ? (_paragraphs.first.translatedText ?? _paragraphs.first.sourceText)
+        : chapterTitle;
+
+    await BookDatabase.instance.addBookmark(
+      BookBookmark(
+        bookId: widget.book.id,
+        chapterIndex: _currentChapterIndex,
+        chapterTitle: chapterTitle,
+        pageIndex: _currentPageInChapter,
+        quoteText: preview.length > 110 ? '${preview.substring(0, 110)}...' : preview,
+        noteText: 'Закладка (стр. ${_currentPageInChapter + 1})',
+        colorHex: 0xFFD98A3C,
+        createdAt: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
+    await _refreshBookmarks();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        duration: Duration(seconds: 2),
+        content: Text('Закладка сохранена!'),
+      ),
+    );
+  }
+
+  Future<void> _saveHighlightedQuote(
+    String quoteText,
+    int colorHex,
+    int pageIdx,
+  ) async {
+    final clean = quoteText.trim();
+    if (clean.isEmpty) return;
+
+    final chapterTitle = _chapters.isNotEmpty
+        ? _chapters[_currentChapterIndex].title
+        : 'Глава ${_currentChapterIndex + 1}';
+
+    await BookDatabase.instance.addBookmark(
+      BookBookmark(
+        bookId: widget.book.id,
+        chapterIndex: _currentChapterIndex,
+        chapterTitle: chapterTitle,
+        pageIndex: pageIdx,
+        quoteText: clean,
+        noteText: 'Цитата',
+        colorHex: colorHex,
+        createdAt: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
+    await _refreshBookmarks();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        duration: Duration(seconds: 2),
+        content: Text('Цитата выделена и сохранена в закладки!'),
+      ),
+    );
+  }
+
+  void _handleBrightnessDelta(double delta) {
+    setState(() {
+      _dimOverlay = (_dimOverlay - delta * 0.85).clamp(0.0, 0.72);
+      _showBrightnessHud = true;
+    });
+    _brightnessHudTimer?.cancel();
+    _brightnessHudTimer = Timer(const Duration(milliseconds: 900), () {
+      if (mounted) setState(() => _showBrightnessHud = false);
+    });
+  }
+
+  KeyEventResult _onHardwareKeyEvent(FocusNode node, KeyEvent event) {
+    if (!_appearance.volumeButtonsTurnPages || event is! KeyDownEvent) {
+      return KeyEventResult.ignored;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.audioVolumeDown) {
+      if (_appearance.pageMode == ReaderPageMode.scroll) {
+        if (_scrollController.hasClients) {
+          _scrollController.animateTo(
+            (_scrollController.offset + 420)
+                .clamp(0.0, _scrollController.position.maxScrollExtent),
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOut,
+          );
+        }
+      } else {
+        setState(() => _currentPageInChapter++);
+      }
+      return KeyEventResult.handled;
+    } else if (event.logicalKey == LogicalKeyboardKey.audioVolumeUp) {
+      if (_appearance.pageMode == ReaderPageMode.scroll) {
+        if (_scrollController.hasClients) {
+          _scrollController.animateTo(
+            (_scrollController.offset - 420)
+                .clamp(0.0, _scrollController.position.maxScrollExtent),
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOut,
+          );
+        }
+      } else if (_currentPageInChapter > 0) {
+        setState(() => _currentPageInChapter--);
+      }
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
   }
 
   Future<void> _downloadBilingualDictionary() async {
@@ -564,6 +691,336 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
+  /// Полноценная шторка оглавления, ползунка по всей книге и закладок/цитат
+  void _openTocAndBookmarksSheet() {
+    final palette = ReaderPalette.of(_appearance.colorTheme);
+    double sliderChapter = _currentChapterIndex.toDouble();
+
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: palette.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return DefaultTabController(
+          length: 2,
+          child: StatefulBuilder(
+            builder: (ctx, setModalState) {
+              final maxCh = (_chapters.length - 1).clamp(0, 99999);
+              final pct = _chapters.isEmpty
+                  ? 0
+                  : (((sliderChapter.round() + 1) / _chapters.length) * 100)
+                      .round();
+
+              return SizedBox(
+                height: MediaQuery.of(ctx).size.height * 0.78,
+                child: Column(
+                  children: [
+                    const SizedBox(height: 10),
+                    Container(
+                      width: 38,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: palette.secondaryText.withOpacity(0.4),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 12, 20, 4),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                'Навигация по книге ($pct%)',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: palette.text,
+                                ),
+                              ),
+                              Text(
+                                'Глава ${sliderChapter.round() + 1} из ${_chapters.length}',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: palette.secondaryText,
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (maxCh > 0)
+                            Slider(
+                              min: 0,
+                              max: maxCh.toDouble(),
+                              divisions: maxCh,
+                              activeColor: palette.accent,
+                              value: sliderChapter.clamp(0, maxCh.toDouble()),
+                              onChanged: (v) {
+                                setModalState(() => sliderChapter = v);
+                              },
+                              onChangeEnd: (v) {
+                                Navigator.of(ctx).pop();
+                                _loadChapter(v.round());
+                              },
+                            ),
+                        ],
+                      ),
+                    ),
+                    TabBar(
+                      labelColor: palette.accent,
+                      unselectedLabelColor: palette.secondaryText,
+                      indicatorColor: palette.accent,
+                      tabs: [
+                        Tab(text: 'Оглавление (${_chapters.length})'),
+                        Tab(text: 'Закладки и цитаты (${_bookmarks.length})'),
+                      ],
+                    ),
+                    Expanded(
+                      child: TabBarView(
+                        children: [
+                          ListView.builder(
+                            itemCount: _chapters.length,
+                            itemBuilder: (context, index) {
+                              final ch = _chapters[index];
+                              final isCurrent = index == _currentChapterIndex;
+                              return ListTile(
+                                dense: true,
+                                leading: CircleAvatar(
+                                  radius: 13,
+                                  backgroundColor: isCurrent
+                                      ? palette.accent
+                                      : palette.background,
+                                  child: Text(
+                                    '${index + 1}',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: isCurrent
+                                          ? Colors.white
+                                          : palette.secondaryText,
+                                    ),
+                                  ),
+                                ),
+                                title: Text(
+                                  ch.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontWeight: isCurrent
+                                        ? FontWeight.bold
+                                        : FontWeight.normal,
+                                    color: isCurrent
+                                        ? palette.accent
+                                        : palette.text,
+                                  ),
+                                ),
+                                trailing: Text(
+                                  _statusLabel(ch.status),
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: palette.secondaryText,
+                                  ),
+                                ),
+                                onTap: () {
+                                  Navigator.of(ctx).pop();
+                                  _loadChapter(index);
+                                },
+                              );
+                            },
+                          ),
+                          _bookmarks.isEmpty
+                              ? Center(
+                                  child: Text(
+                                    'Пока нет закладок и выделенных цитат',
+                                    style: TextStyle(
+                                      color: palette.secondaryText,
+                                    ),
+                                  ),
+                                )
+                              : ListView.builder(
+                                  itemCount: _bookmarks.length,
+                                  itemBuilder: (context, index) {
+                                    final b = _bookmarks[index];
+                                    return ListTile(
+                                      leading: Icon(
+                                        Icons.bookmark,
+                                        color: Color(b.colorHex),
+                                      ),
+                                      title: Text(
+                                        b.quoteText,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          color: palette.text,
+                                        ),
+                                      ),
+                                      subtitle: Text(
+                                        '${b.chapterTitle} • стр. ${b.pageIndex + 1}',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: palette.secondaryText,
+                                        ),
+                                      ),
+                                      trailing: IconButton(
+                                        icon: const Icon(
+                                          Icons.delete_outline,
+                                          size: 18,
+                                          color: Colors.redAccent,
+                                        ),
+                                        onPressed: () async {
+                                          if (b.id != null) {
+                                            await BookDatabase.instance
+                                                .deleteBookmark(b.id!);
+                                            await _refreshBookmarks();
+                                            setModalState(() {});
+                                          }
+                                        },
+                                      ),
+                                      onTap: () {
+                                        Navigator.of(ctx).pop();
+                                        _loadChapter(
+                                          b.chapterIndex,
+                                          startPage: b.pageIndex,
+                                        );
+                                      },
+                                    );
+                                  },
+                                ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  /// Полнотекстовый поиск по всей книге
+  void _openSearchSheet() {
+    final palette = ReaderPalette.of(_appearance.colorTheme);
+    final searchCtrl = TextEditingController();
+    List<SearchHit> hits = [];
+    bool searching = false;
+
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: palette.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            Future<void> runSearch(String q) async {
+              if (q.trim().length < 2) {
+                setModalState(() => hits = []);
+                return;
+              }
+              setModalState(() => searching = true);
+              final found = await BookDatabase.instance.searchInBook(
+                widget.book.id,
+                q,
+              );
+              setModalState(() {
+                hits = found;
+                searching = false;
+              });
+            }
+
+            return Padding(
+              padding: EdgeInsets.fromLTRB(
+                16,
+                16,
+                16,
+                MediaQuery.of(ctx).viewInsets.bottom + 16,
+              ),
+              child: SizedBox(
+                height: MediaQuery.of(ctx).size.height * 0.65,
+                child: Column(
+                  children: [
+                    TextField(
+                      controller: searchCtrl,
+                      autofocus: true,
+                      style: TextStyle(color: palette.text),
+                      onChanged: runSearch,
+                      decoration: InputDecoration(
+                        hintText: 'Поиск слова или имени по всей книге...',
+                        hintStyle: TextStyle(color: palette.secondaryText),
+                        prefixIcon: Icon(Icons.search, color: palette.accent),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    if (searching)
+                      LinearProgressIndicator(color: palette.accent),
+                    Expanded(
+                      child: hits.isEmpty
+                          ? Center(
+                              child: Text(
+                                searchCtrl.text.trim().length < 2
+                                    ? 'Введите минимум 2 символа'
+                                    : 'Ничего не найдено',
+                                style: TextStyle(color: palette.secondaryText),
+                              ),
+                            )
+                          : ListView.separated(
+                              itemCount: hits.length,
+                              separatorBuilder: (_, __) => Divider(
+                                height: 1,
+                                color: palette.secondaryText.withOpacity(0.15),
+                              ),
+                              itemBuilder: (context, index) {
+                                final h = hits[index];
+                                return ListTile(
+                                  title: Text(
+                                    'Гл. ${h.chapterIndex + 1}: ${h.chapterTitle}',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold,
+                                      color: palette.accent,
+                                    ),
+                                  ),
+                                  subtitle: Text(
+                                    h.snippet,
+                                    maxLines: 3,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: palette.text,
+                                    ),
+                                  ),
+                                  onTap: () {
+                                    Navigator.of(ctx).pop();
+                                    final estPage = (h.orderIndex ~/ 4);
+                                    _loadChapter(
+                                      h.chapterIndex,
+                                      startPage: estPage,
+                                    );
+                                  },
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   String _statusLabel(ChapterStatus status) {
     switch (status) {
       case ChapterStatus.completed:
@@ -604,295 +1061,434 @@ class _ReaderScreenState extends State<ReaderScreen> {
             }
 
             return Container(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(ctx).size.height * 0.85,
+              ),
               decoration: BoxDecoration(
                 color: palette.surface,
                 borderRadius: const BorderRadius.vertical(
                   top: Radius.circular(20),
                 ),
               ),
-              padding: const EdgeInsets.fromLTRB(20, 14, 20, 28),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Center(
-                    child: Container(
-                      width: 38,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: palette.secondaryText.withOpacity(0.4),
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  Text(
-                    'Оформление и движок перевода',
-                    style: TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.bold,
-                      color: palette.text,
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-
-                  Text(
-                    'Движок перевода',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: palette.secondaryText,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      _modeChip(
-                        palette: palette,
-                        icon: Icons.bolt,
-                        label: 'ИИ-модели',
-                        selected: !isOffline,
-                        onTap: () async {
-                          await _toggleQuickEngine(false);
-                          setModalState(() {});
-                        },
-                      ),
-                      const SizedBox(width: 8),
-                      _modeChip(
-                        palette: palette,
-                        icon: Icons.offline_pin_outlined,
-                        label: 'Офлайн-словарь',
-                        selected: isOffline,
-                        onTap: () async {
-                          await _toggleQuickEngine(true);
-                          setModalState(() {});
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-
-                  Text(
-                    'Отображение текста',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: palette.secondaryText,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      _modeChip(
-                        palette: palette,
-                        icon: Icons.translate,
-                        label: 'Перевод',
-                        selected: _appearance.textDisplay ==
-                            ReaderTextDisplay.translationOnly,
-                        onTap: () => apply(
-                          _appearance.copyWith(
-                            textDisplay: ReaderTextDisplay.translationOnly,
-                          ),
+              padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 38,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: palette.secondaryText.withOpacity(0.4),
+                          borderRadius: BorderRadius.circular(2),
                         ),
                       ),
-                      const SizedBox(width: 8),
-                      _modeChip(
-                        palette: palette,
-                        icon: Icons.vertical_split,
-                        label: 'Билингва',
-                        selected: _appearance.textDisplay ==
-                            ReaderTextDisplay.bilingual,
-                        onTap: () => apply(
-                          _appearance.copyWith(
-                            textDisplay: ReaderTextDisplay.bilingual,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      _modeChip(
-                        palette: palette,
-                        icon: Icons.menu_book,
-                        label: 'Оригинал',
-                        selected: _appearance.textDisplay ==
-                            ReaderTextDisplay.originalOnly,
-                        onTap: () => apply(
-                          _appearance.copyWith(
-                            textDisplay: ReaderTextDisplay.originalOnly,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-
-                  Text(
-                    'Цветовая схема',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: palette.secondaryText,
                     ),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: ReaderColorTheme.values.map((t) {
-                      final itemPalette = ReaderPalette.of(t);
-                      final selected = _appearance.colorTheme == t;
-                      return Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 4),
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(12),
-                            onTap: () =>
-                                apply(_appearance.copyWith(colorTheme: t)),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(vertical: 10),
-                              decoration: BoxDecoration(
-                                color: itemPalette.background,
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                  color: selected
-                                      ? palette.accent
-                                      : palette.secondaryText.withOpacity(0.3),
-                                  width: selected ? 2.2 : 1,
-                                ),
-                              ),
-                              child: Column(
-                                children: [
-                                  Text(
-                                    'Аа',
-                                    style: TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.bold,
-                                      color: itemPalette.text,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    itemPalette.name,
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: itemPalette.secondaryText,
-                                    ),
-                                  ),
-                                ],
-                              ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Типографика, тема и переводчик',
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.bold,
+                        color: palette.text,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+
+                    Text(
+                      'Движок перевода',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: palette.secondaryText,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        _modeChip(
+                          palette: palette,
+                          icon: Icons.bolt,
+                          label: 'ИИ-модели',
+                          selected: !isOffline,
+                          onTap: () async {
+                            await _toggleQuickEngine(false);
+                            setModalState(() {});
+                          },
+                        ),
+                        const SizedBox(width: 8),
+                        _modeChip(
+                          palette: palette,
+                          icon: Icons.offline_pin_outlined,
+                          label: 'Офлайн-словарь',
+                          selected: isOffline,
+                          onTap: () async {
+                            await _toggleQuickEngine(true);
+                            setModalState(() {});
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+
+                    Text(
+                      'Отображение текста',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: palette.secondaryText,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        _modeChip(
+                          palette: palette,
+                          icon: Icons.translate,
+                          label: 'Перевод',
+                          selected: _appearance.textDisplay ==
+                              ReaderTextDisplay.translationOnly,
+                          onTap: () => apply(
+                            _appearance.copyWith(
+                              textDisplay: ReaderTextDisplay.translationOnly,
                             ),
                           ),
                         ),
-                      );
-                    }).toList(),
-                  ),
-                  const SizedBox(height: 16),
-
-                  Text(
-                    'Режим листания',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: palette.secondaryText,
+                        const SizedBox(width: 8),
+                        _modeChip(
+                          palette: palette,
+                          icon: Icons.vertical_split,
+                          label: 'Билингва',
+                          selected: _appearance.textDisplay ==
+                              ReaderTextDisplay.bilingual,
+                          onTap: () => apply(
+                            _appearance.copyWith(
+                              textDisplay: ReaderTextDisplay.bilingual,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        _modeChip(
+                          palette: palette,
+                          icon: Icons.menu_book,
+                          label: 'Оригинал',
+                          selected: _appearance.textDisplay ==
+                              ReaderTextDisplay.originalOnly,
+                          onTap: () => apply(
+                            _appearance.copyWith(
+                              textDisplay: ReaderTextDisplay.originalOnly,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      _modeChip(
-                        palette: palette,
-                        icon: Icons.swap_vert,
-                        label: 'Прокрутка',
-                        selected:
-                            _appearance.pageMode == ReaderPageMode.scroll,
-                        onTap: () => apply(
-                          _appearance.copyWith(pageMode: ReaderPageMode.scroll),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      _modeChip(
-                        palette: palette,
-                        icon: Icons.swipe,
-                        label: 'Листание',
-                        selected:
-                            _appearance.pageMode == ReaderPageMode.pageSlide,
-                        onTap: () => apply(
-                          _appearance.copyWith(
-                            pageMode: ReaderPageMode.pageSlide,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      _modeChip(
-                        palette: palette,
-                        icon: Icons.auto_stories,
-                        label: 'Книга 3D',
-                        selected:
-                            _appearance.pageMode == ReaderPageMode.pageCurl,
-                        onTap: () => apply(
-                          _appearance.copyWith(
-                            pageMode: ReaderPageMode.pageCurl,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
+                    const SizedBox(height: 14),
 
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        'Размер шрифта',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: palette.secondaryText,
-                        ),
+                    Text(
+                      'Гарнитура шрифта',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: palette.secondaryText,
                       ),
-                      Text(
-                        '${_appearance.fontSize.toInt()} pt',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
-                          color: palette.text,
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        _modeChip(
+                          palette: palette,
+                          icon: Icons.auto_stories_outlined,
+                          label: 'Книжный Serif',
+                          selected:
+                              _appearance.fontFamily == ReaderFontFamily.serif,
+                          onTap: () => apply(
+                            _appearance.copyWith(
+                              fontFamily: ReaderFontFamily.serif,
+                            ),
+                          ),
                         ),
+                        const SizedBox(width: 8),
+                        _modeChip(
+                          palette: palette,
+                          icon: Icons.font_download_outlined,
+                          label: 'Системный',
+                          selected:
+                              _appearance.fontFamily == ReaderFontFamily.system,
+                          onTap: () => apply(
+                            _appearance.copyWith(
+                              fontFamily: ReaderFontFamily.system,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        _modeChip(
+                          palette: palette,
+                          icon: Icons.code,
+                          label: 'Моно',
+                          selected: _appearance.fontFamily ==
+                              ReaderFontFamily.monospace,
+                          onTap: () => apply(
+                            _appearance.copyWith(
+                              fontFamily: ReaderFontFamily.monospace,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+
+                    Text(
+                      'Цветовая схема',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: palette.secondaryText,
                       ),
-                    ],
-                  ),
-                  Row(
-                    children: [
-                      IconButton(
-                        onPressed: _appearance.fontSize > 13
-                            ? () => apply(
-                                  _appearance.copyWith(
-                                    fontSize: _appearance.fontSize - 1,
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: ReaderColorTheme.values.map((t) {
+                        final itemPalette = ReaderPalette.of(t);
+                        final selected = _appearance.colorTheme == t;
+                        return Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 4),
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(12),
+                              onTap: () =>
+                                  apply(_appearance.copyWith(colorTheme: t)),
+                              child: Container(
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 10),
+                                decoration: BoxDecoration(
+                                  color: itemPalette.background,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: selected
+                                        ? palette.accent
+                                        : palette.secondaryText
+                                            .withOpacity(0.3),
+                                    width: selected ? 2.2 : 1,
                                   ),
-                                )
-                            : null,
-                        icon: Icon(Icons.text_decrease, color: palette.text),
+                                ),
+                                child: Column(
+                                  children: [
+                                    Text(
+                                      'Аа',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold,
+                                        color: itemPalette.text,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      itemPalette.name,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: itemPalette.secondaryText,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                    const SizedBox(height: 14),
+
+                    Text(
+                      'Режим листания',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: palette.secondaryText,
                       ),
-                      Expanded(
-                        child: Slider(
-                          min: 13,
-                          max: 28,
-                          divisions: 15,
-                          activeColor: palette.accent,
-                          value: _appearance.fontSize,
-                          onChanged: (v) =>
-                              apply(_appearance.copyWith(fontSize: v)),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        _modeChip(
+                          palette: palette,
+                          icon: Icons.swap_vert,
+                          label: 'Прокрутка',
+                          selected:
+                              _appearance.pageMode == ReaderPageMode.scroll,
+                          onTap: () => apply(
+                            _appearance.copyWith(
+                              pageMode: ReaderPageMode.scroll,
+                            ),
+                          ),
                         ),
+                        const SizedBox(width: 8),
+                        _modeChip(
+                          palette: palette,
+                          icon: Icons.swipe,
+                          label: 'Листание',
+                          selected:
+                              _appearance.pageMode == ReaderPageMode.pageSlide,
+                          onTap: () => apply(
+                            _appearance.copyWith(
+                              pageMode: ReaderPageMode.pageSlide,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        _modeChip(
+                          palette: palette,
+                          icon: Icons.auto_stories,
+                          label: 'Книга 3D',
+                          selected:
+                              _appearance.pageMode == ReaderPageMode.pageCurl,
+                          onTap: () => apply(
+                            _appearance.copyWith(
+                              pageMode: ReaderPageMode.pageCurl,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          'Размер шрифта: ${_appearance.fontSize.toInt()} pt',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: palette.secondaryText,
+                          ),
+                        ),
+                        Text(
+                          'Поля: ${_appearance.horizontalMargin.toInt()} px',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: palette.secondaryText,
+                          ),
+                        ),
+                      ],
+                    ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Slider(
+                            min: 13,
+                            max: 28,
+                            divisions: 15,
+                            activeColor: palette.accent,
+                            value: _appearance.fontSize,
+                            onChanged: (v) =>
+                                apply(_appearance.copyWith(fontSize: v)),
+                          ),
+                        ),
+                        Expanded(
+                          child: Slider(
+                            min: 10,
+                            max: 44,
+                            divisions: 17,
+                            activeColor: palette.accent,
+                            value: _appearance.horizontalMargin,
+                            onChanged: (v) => apply(
+                              _appearance.copyWith(horizontalMargin: v),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          'Межстрочный интервал: ${_appearance.lineHeight.toStringAsFixed(2)}',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: palette.secondaryText,
+                          ),
+                        ),
+                        Text(
+                          'Фильтр синего: ${(_appearance.blueLightFilter * 100).round()}%',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: palette.secondaryText,
+                          ),
+                        ),
+                      ],
+                    ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Slider(
+                            min: 1.2,
+                            max: 2.0,
+                            divisions: 8,
+                            activeColor: palette.accent,
+                            value: _appearance.lineHeight,
+                            onChanged: (v) =>
+                                apply(_appearance.copyWith(lineHeight: v)),
+                          ),
+                        ),
+                        Expanded(
+                          child: Slider(
+                            min: 0.0,
+                            max: 0.45,
+                            divisions: 9,
+                            activeColor: Colors.amber,
+                            value: _appearance.blueLightFilter,
+                            onChanged: (v) => apply(
+                              _appearance.copyWith(blueLightFilter: v),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    SwitchListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      activeColor: palette.accent,
+                      title: Text(
+                        'Выравнивание по ширине (книжный блок)',
+                        style: TextStyle(fontSize: 13, color: palette.text),
                       ),
-                      IconButton(
-                        onPressed: _appearance.fontSize < 28
-                            ? () => apply(
-                                  _appearance.copyWith(
-                                    fontSize: _appearance.fontSize + 1,
-                                  ),
-                                )
-                            : null,
-                        icon: Icon(Icons.text_increase, color: palette.text),
+                      value: _appearance.justifyText,
+                      onChanged: (v) =>
+                          apply(_appearance.copyWith(justifyText: v)),
+                    ),
+                    SwitchListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      activeColor: palette.accent,
+                      title: Text(
+                        'Красная строка (отступ абзацев)',
+                        style: TextStyle(fontSize: 13, color: palette.text),
                       ),
-                    ],
-                  ),
-                ],
+                      value: _appearance.paragraphIndent,
+                      onChanged: (v) =>
+                          apply(_appearance.copyWith(paragraphIndent: v)),
+                    ),
+                    SwitchListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      activeColor: palette.accent,
+                      title: Text(
+                        'Листать страницы кнопками громкости',
+                        style: TextStyle(fontSize: 13, color: palette.text),
+                      ),
+                      value: _appearance.volumeButtonsTurnPages,
+                      onChanged: (v) => apply(
+                        _appearance.copyWith(volumeButtonsTurnPages: v),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             );
           },
@@ -913,7 +1509,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         borderRadius: BorderRadius.circular(12),
         onTap: onTap,
         child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
+          padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 4),
           decoration: BoxDecoration(
             color: selected
                 ? palette.accent.withOpacity(0.18)
@@ -930,14 +1526,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
             children: [
               Icon(
                 icon,
-                size: 20,
+                size: 19,
                 color: selected ? palette.accent : palette.text,
               ),
-              const SizedBox(height: 4),
+              const SizedBox(height: 3),
               Text(
                 label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  fontSize: 12,
+                  fontSize: 11,
                   fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
                   color: selected ? palette.accent : palette.text,
                 ),
@@ -1168,6 +1766,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
     required TextStyle baseStyle,
     required bool isOriginalText,
   }) {
+    final formatted = _appearance.paragraphIndent
+        ? '\u00A0\u00A0\u00A0\u00A0${text.trim()}'
+        : text.trim();
     final activeToken = _scrollHighlightOrder == paragraph.orderIndex
         ? (isOriginalText
             ? _scrollHighlightSourceToken
@@ -1178,7 +1779,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         ? const Color(0xFFD98A3C).withOpacity(0.38)
         : const Color(0xFFFFD54F).withOpacity(0.78);
 
-    final tokens = _tokenize(text);
+    final tokens = _tokenize(formatted);
     final spans = <InlineSpan>[];
 
     for (int i = 0; i < tokens.length; i++) {
@@ -1213,16 +1814,21 @@ class _ReaderScreenState extends State<ReaderScreen> {
       }
     }
 
-    return Text.rich(TextSpan(style: baseStyle, children: spans));
+    return Text.rich(
+      TextSpan(style: baseStyle, children: spans),
+      textAlign: _appearance.textAlign,
+    );
   }
 
   @override
   void dispose() {
+    _brightnessHudTimer?.cancel();
     _saveProgressDebounce?.cancel();
     _persistReadingProgressNow();
     _progressSub?.cancel();
     _scrollController.dispose();
     _chaptersAheadController.dispose();
+    _keyboardFocusNode.dispose();
     super.dispose();
   }
 
@@ -1234,392 +1840,520 @@ class _ReaderScreenState extends State<ReaderScreen> {
         : 'Глава 1';
     final isOfflineEngine =
         _settings.engineMode == TranslationEngineMode.offlineLocal;
+    final chapterBookmarks = _bookmarks
+        .where((b) => b.chapterIndex == _currentChapterIndex)
+        .toList();
 
-    return Theme(
-      data: ThemeData(
-        brightness: palette.brightness,
-        scaffoldBackgroundColor: palette.background,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: palette.accent,
+    return Focus(
+      focusNode: _keyboardFocusNode,
+      autofocus: true,
+      onKeyEvent: _onHardwareKeyEvent,
+      child: Theme(
+        data: ThemeData(
           brightness: palette.brightness,
-        ),
-        useMaterial3: true,
-      ),
-      child: Scaffold(
-        backgroundColor: palette.background,
-        appBar: AppBar(
-          backgroundColor: palette.surface,
-          foregroundColor: palette.text,
-          elevation: 0,
-          title: Text(
-            widget.book.title,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(color: palette.text, fontSize: 17),
+          scaffoldBackgroundColor: palette.background,
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: palette.accent,
+            brightness: palette.brightness,
           ),
-          actions: [
-            Padding(
-              padding: const EdgeInsets.only(right: 4),
-              child: ActionChip(
-                avatar: Icon(
-                  isOfflineEngine ? Icons.offline_pin : Icons.bolt,
-                  size: 16,
-                  color: palette.accent,
-                ),
-                label: Text(
-                  isOfflineEngine ? 'Офлайн' : 'ИИ',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                    color: palette.text,
-                  ),
-                ),
-                backgroundColor: palette.background,
-                side: BorderSide(color: palette.accent.withOpacity(0.45)),
-                onPressed: () => _toggleQuickEngine(!isOfflineEngine),
-              ),
-            ),
-            IconButton(
-              icon: Icon(
-                _showControls ? Icons.fullscreen : Icons.fullscreen_exit,
-                color: palette.text,
-              ),
-              tooltip: _showControls ? 'Скрыть панель' : 'Показать панель',
-              onPressed: () => setState(() => _showControls = !_showControls),
-            ),
-            IconButton(
-              icon: Icon(Icons.text_fields, color: palette.text),
-              tooltip: 'Шрифт, тема и движок',
-              onPressed: _openAppearanceSheet,
-            ),
-          ],
+          useMaterial3: true,
         ),
-        body: Column(
-          children: [
-            if (_showControls) ...[
-              StreamBuilder<TranslationProgress>(
-                stream: widget.queueController.progressStream,
-                initialData: widget.queueController.currentProgress,
-                builder: (context, snapshot) {
-                  final p = snapshot.data ?? const TranslationProgress();
-                  final isThisBook = p.activeBookId.isEmpty ||
-                      p.activeBookId == widget.book.id;
-                  final modelBadge =
-                      p.activeModel.isNotEmpty ? ' • ${p.activeModel}' : '';
-
-                  return Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 8,
-                    ),
-                    color: palette.surface,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Expanded(
-                              child: DropdownButton<TranslateMode>(
-                                isExpanded: true,
-                                dropdownColor: palette.surface,
-                                style: TextStyle(
-                                  color: palette.text,
-                                  fontSize: 13,
-                                ),
-                                value: _selectedMode,
-                                items: const [
-                                  DropdownMenuItem(
-                                    value: TranslateMode.nextChapters,
-                                    child: Text('+N глав вперёд'),
-                                  ),
-                                  DropdownMenuItem(
-                                    value: TranslateMode.specificChapter,
-                                    child: Text('Конкретная глава'),
-                                  ),
-                                  DropdownMenuItem(
-                                    value: TranslateMode.fullBook,
-                                    child: Text('Вся книга'),
-                                  ),
-                                ],
-                                onChanged: p.isRunning
-                                    ? null
-                                    : (val) {
-                                        if (val != null) {
-                                          setState(() {
-                                            _selectedMode = val;
-                                            if (val ==
-                                                TranslateMode.specificChapter) {
-                                              _specificChapterIndex =
-                                                  _currentChapterIndex;
-                                            }
-                                          });
-                                        }
-                                      },
-                              ),
-                            ),
-                            if (_selectedMode == TranslateMode.nextChapters) ...[
-                              const SizedBox(width: 6),
-                              SizedBox(
-                                width: 54,
-                                height: 38,
-                                child: TextField(
-                                  controller: _chaptersAheadController,
-                                  enabled: !p.isRunning,
-                                  keyboardType: TextInputType.number,
-                                  textAlign: TextAlign.center,
-                                  inputFormatters: [
-                                    FilteringTextInputFormatter.digitsOnly,
-                                  ],
-                                  style: TextStyle(
-                                    color: palette.text,
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                  decoration: InputDecoration(
-                                    contentPadding: const EdgeInsets.symmetric(
-                                      horizontal: 4,
-                                      vertical: 4,
-                                    ),
-                                    hintText: '3',
-                                    border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ] else if (_selectedMode ==
-                                    TranslateMode.specificChapter &&
-                                _chapters.isNotEmpty) ...[
-                              const SizedBox(width: 6),
-                              Expanded(
-                                child: DropdownButton<int>(
-                                  isExpanded: true,
-                                  dropdownColor: palette.surface,
-                                  style: TextStyle(
-                                    color: palette.text,
-                                    fontSize: 13,
-                                  ),
-                                  value: _specificChapterIndex.clamp(
-                                    0,
-                                    _chapters.length - 1,
-                                  ),
-                                  items: _chapters
-                                      .map(
-                                        (ch) => DropdownMenuItem(
-                                          value: ch.index,
-                                          child: Text(
-                                            'Гл. ${ch.index + 1}: ${ch.title}',
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                        ),
-                                      )
-                                      .toList(),
-                                  onChanged: p.isRunning
-                                      ? null
-                                      : (val) {
-                                          if (val != null) {
-                                            setState(
-                                              () => _specificChapterIndex = val,
-                                            );
-                                          }
-                                        },
-                                ),
-                              ),
-                            ],
-                            const SizedBox(width: 6),
-                            if (p.isRunning)
-                              FilledButton.tonalIcon(
-                                onPressed: widget.queueController.stop,
-                                icon: const Icon(Icons.stop, size: 18),
-                                label: const Text('Стоп'),
-                              )
-                            else ...[
-                              FilledButton.icon(
-                                onPressed: () => _startQueue(),
-                                icon: const Icon(Icons.play_arrow, size: 18),
-                                label: const Text('Старт'),
-                              ),
-                              const SizedBox(width: 4),
-                              IconButton.outlined(
-                                tooltip: 'Перевести повторно (перезаписать)',
-                                icon: const Icon(Icons.refresh, size: 20),
-                                onPressed: _confirmAndRetranslate,
-                              ),
-                            ],
-                          ],
-                        ),
-                        if (p.isRunning ||
-                            p.isPausedOffline ||
-                            p.rateLimitWaitSeconds > 0 ||
-                            p.errorMessage != null)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 6),
-                            child: Text(
-                              !isThisBook && p.isRunning
-                                  ? 'В фоне переводится «${p.activeBookTitle}» — глава ${p.currentChapter}...'
-                                  : p.isPausedOffline
-                                      ? 'Нет сети — перевод на паузе. Ждём подключение...'
-                                      : p.rateLimitWaitSeconds > 0
-                                          ? 'Все модели в лимите — ждём квоту: ${_formatWaitTime(p.rateLimitWaitSeconds)}...'
-                                          : p.errorMessage != null
-                                              ? 'Ошибка: ${p.errorMessage}'
-                                              : 'Глава ${p.currentChapter} (в очереди ${p.totalChaptersInJob})$modelBadge: '
-                                                  'абзацев ${p.translatedParagraphsInChapter}/${p.totalParagraphsInChapter}',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: p.errorMessage != null
-                                    ? Colors.redAccent
-                                    : p.rateLimitWaitSeconds > 0
-                                        ? Colors.orangeAccent
-                                        : palette.accent,
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  );
-                },
+        child: Scaffold(
+          backgroundColor: palette.background,
+          appBar: AppBar(
+            backgroundColor: palette.surface,
+            foregroundColor: palette.text,
+            elevation: 0,
+            title: Text(
+              widget.book.title,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: palette.text, fontSize: 16),
+            ),
+            actions: [
+              IconButton(
+                icon: Icon(Icons.search, color: palette.text, size: 21),
+                tooltip: 'Поиск по книге',
+                onPressed: _openSearchSheet,
               ),
-              if (_chapters.isNotEmpty)
-                Container(
-                  color: palette.background,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  child: Row(
-                    children: [
-                      IconButton(
-                        onPressed: _currentChapterIndex > 0
-                            ? () => _loadChapter(_currentChapterIndex - 1)
-                            : null,
-                        icon: Icon(
-                          Icons.arrow_back_ios,
-                          size: 16,
-                          color: palette.text,
-                        ),
-                      ),
-                      Expanded(
-                        child: DropdownButton<int>(
-                          isExpanded: true,
-                          underline: const SizedBox.shrink(),
-                          dropdownColor: palette.surface,
-                          style: TextStyle(color: palette.text, fontSize: 14),
-                          value: _currentChapterIndex,
-                          items: _chapters
-                              .map(
-                                (ch) => DropdownMenuItem(
-                                  value: ch.index,
-                                  child: Text(
-                                    '${ch.index + 1}. ${ch.title} [${_statusLabel(ch.status)}]',
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                              )
-                              .toList(),
-                          onChanged: (idx) {
-                            if (idx != null) _loadChapter(idx);
-                          },
-                        ),
-                      ),
-                      IconButton(
-                        onPressed: _currentChapterIndex < _chapters.length - 1
-                            ? () => _loadChapter(_currentChapterIndex + 1)
-                            : null,
-                        icon: Icon(
-                          Icons.arrow_forward_ios,
-                          size: 16,
-                          color: palette.text,
-                        ),
-                      ),
-                    ],
-                  ),
+              IconButton(
+                icon: Icon(
+                  Icons.bookmark_add_outlined,
+                  color: palette.text,
+                  size: 21,
                 ),
-              if (_appearance.showOriginal && !_mlKitModelReady)
-                Container(
-                  width: double.infinity,
-                  color: palette.accent.withOpacity(0.14),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  child: Row(
-                    children: [
-                      Icon(Icons.flash_on, size: 16, color: palette.accent),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          'Для мгновенной подсветки старых глав скачайте словарь (~30 МБ)',
-                          style: TextStyle(fontSize: 11, color: palette.text),
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: _downloadingDictInReader
-                            ? null
-                            : _downloadBilingualDictionary,
-                        child: _downloadingDictInReader
-                            ? SizedBox(
-                                width: 14,
-                                height: 14,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: palette.accent,
-                                ),
-                              )
-                            : Text(
-                                'Скачать',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                  color: palette.accent,
-                                ),
-                              ),
-                      ),
-                    ],
+                tooltip: 'Добавить закладку',
+                onPressed: _addQuickBookmark,
+              ),
+              Padding(
+                padding: const EdgeInsets.only(right: 2),
+                child: ActionChip(
+                  visualDensity: VisualDensity.compact,
+                  avatar: Icon(
+                    isOfflineEngine ? Icons.offline_pin : Icons.bolt,
+                    size: 14,
+                    color: palette.accent,
                   ),
+                  label: Text(
+                    isOfflineEngine ? 'Офл' : 'ИИ',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: palette.text,
+                    ),
+                  ),
+                  backgroundColor: palette.background,
+                  side: BorderSide(color: palette.accent.withOpacity(0.45)),
+                  onPressed: () => _toggleQuickEngine(!isOfflineEngine),
                 ),
-              Divider(
-                height: 1,
-                color: palette.secondaryText.withOpacity(0.2),
+              ),
+              IconButton(
+                icon: Icon(
+                  _showControls ? Icons.fullscreen : Icons.fullscreen_exit,
+                  color: palette.text,
+                  size: 21,
+                ),
+                tooltip: _showControls ? 'Скрыть панель' : 'Показать панель',
+                onPressed: () => setState(() => _showControls = !_showControls),
+              ),
+              IconButton(
+                icon: Icon(Icons.text_fields, color: palette.text, size: 21),
+                tooltip: 'Шрифт, тема и типографика',
+                onPressed: _openAppearanceSheet,
               ),
             ],
-            Expanded(
-              child: _loadingChapter
-                  ? Center(
-                      child: CircularProgressIndicator(color: palette.accent),
-                    )
-                  : _appearance.pageMode == ReaderPageMode.scroll
-                      ? _buildScrollReader(palette, currentChapterTitle)
-                      : BookPageView(
-                          key: ValueKey('book_view_$_currentChapterIndex'),
-                          chapterTitle: currentChapterTitle,
-                          paragraphs: _paragraphs,
-                          appearance: _appearance,
-                          palette: palette,
-                          initialPage: _currentPageInChapter,
-                          onPageChanged: (page) {
-                            _currentPageInChapter = page;
-                            _scheduleSaveReadingProgress();
-                          },
-                          onCenterTap: () {
-                            setState(() => _showControls = !_showControls);
-                          },
-                          onNextChapter: () {
-                            if (_currentChapterIndex < _chapters.length - 1) {
-                              _loadChapter(_currentChapterIndex + 1);
-                            }
-                          },
-                          onPrevChapter: () {
-                            if (_currentChapterIndex > 0) {
-                              _loadChapter(_currentChapterIndex - 1);
-                            }
-                          },
-                          onTranslateHere: () => _startQueue(
-                            overrideMode: TranslateMode.specificChapter,
+          ),
+          body: Stack(
+            children: [
+              Column(
+                children: [
+                  if (_showControls) ...[
+                    StreamBuilder<TranslationProgress>(
+                      stream: widget.queueController.progressStream,
+                      initialData: widget.queueController.currentProgress,
+                      builder: (context, snapshot) {
+                        final p = snapshot.data ?? const TranslationProgress();
+                        final isThisBook = p.activeBookId.isEmpty ||
+                            p.activeBookId == widget.book.id;
+                        final modelBadge = p.activeModel.isNotEmpty
+                            ? ' • ${p.activeModel}'
+                            : '';
+
+                        return Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 8,
                           ),
-                          onTranslateSelection: _showSelectionTranslationSheet,
-                          onSaveSelectionToDictionary:
-                              _saveToDictionaryDirectly,
-                          onLookupWordInContext: _lookupWordInContext,
+                          color: palette.surface,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: DropdownButton<TranslateMode>(
+                                      isExpanded: true,
+                                      dropdownColor: palette.surface,
+                                      style: TextStyle(
+                                        color: palette.text,
+                                        fontSize: 13,
+                                      ),
+                                      value: _selectedMode,
+                                      items: const [
+                                        DropdownMenuItem(
+                                          value: TranslateMode.nextChapters,
+                                          child: Text('+N глав вперёд'),
+                                        ),
+                                        DropdownMenuItem(
+                                          value: TranslateMode.specificChapter,
+                                          child: Text('Конкретная глава'),
+                                        ),
+                                        DropdownMenuItem(
+                                          value: TranslateMode.fullBook,
+                                          child: Text('Вся книга'),
+                                        ),
+                                      ],
+                                      onChanged: p.isRunning
+                                          ? null
+                                          : (val) {
+                                              if (val != null) {
+                                                setState(() {
+                                                  _selectedMode = val;
+                                                  if (val ==
+                                                      TranslateMode
+                                                          .specificChapter) {
+                                                    _specificChapterIndex =
+                                                        _currentChapterIndex;
+                                                  }
+                                                });
+                                              }
+                                            },
+                                    ),
+                                  ),
+                                  if (_selectedMode ==
+                                      TranslateMode.nextChapters) ...[
+                                    const SizedBox(width: 6),
+                                    SizedBox(
+                                      width: 54,
+                                      height: 38,
+                                      child: TextField(
+                                        controller: _chaptersAheadController,
+                                        enabled: !p.isRunning,
+                                        keyboardType: TextInputType.number,
+                                        textAlign: TextAlign.center,
+                                        inputFormatters: [
+                                          FilteringTextInputFormatter
+                                              .digitsOnly,
+                                        ],
+                                        style: TextStyle(
+                                          color: palette.text,
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                        decoration: InputDecoration(
+                                          contentPadding:
+                                              const EdgeInsets.symmetric(
+                                            horizontal: 4,
+                                            vertical: 4,
+                                          ),
+                                          hintText: '3',
+                                          border: OutlineInputBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ] else if (_selectedMode ==
+                                          TranslateMode.specificChapter &&
+                                      _chapters.isNotEmpty) ...[
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      child: DropdownButton<int>(
+                                        isExpanded: true,
+                                        dropdownColor: palette.surface,
+                                        style: TextStyle(
+                                          color: palette.text,
+                                          fontSize: 13,
+                                        ),
+                                        value: _specificChapterIndex.clamp(
+                                          0,
+                                          _chapters.length - 1,
+                                        ),
+                                        items: _chapters
+                                            .map(
+                                              (ch) => DropdownMenuItem(
+                                                value: ch.index,
+                                                child: Text(
+                                                  'Гл. ${ch.index + 1}: ${ch.title}',
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                ),
+                                              ),
+                                            )
+                                            .toList(),
+                                        onChanged: p.isRunning
+                                            ? null
+                                            : (val) {
+                                                if (val != null) {
+                                                  setState(
+                                                    () =>
+                                                        _specificChapterIndex =
+                                                            val,
+                                                  );
+                                                }
+                                              },
+                                      ),
+                                    ),
+                                  ],
+                                  const SizedBox(width: 6),
+                                  if (p.isRunning)
+                                    FilledButton.tonalIcon(
+                                      onPressed: widget.queueController.stop,
+                                      icon: const Icon(Icons.stop, size: 18),
+                                      label: const Text('Стоп'),
+                                    )
+                                  else ...[
+                                    FilledButton.icon(
+                                      onPressed: () => _startQueue(),
+                                      icon: const Icon(
+                                        Icons.play_arrow,
+                                        size: 18,
+                                      ),
+                                      label: const Text('Старт'),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    IconButton.outlined(
+                                      tooltip:
+                                          'Перевести повторно (перезаписать)',
+                                      icon:
+                                          const Icon(Icons.refresh, size: 20),
+                                      onPressed: _confirmAndRetranslate,
+                                    ),
+                                  ],
+                                ],
+                              ),
+                              if (p.isRunning ||
+                                  p.isPausedOffline ||
+                                  p.rateLimitWaitSeconds > 0 ||
+                                  p.errorMessage != null)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 6),
+                                  child: Text(
+                                    !isThisBook && p.isRunning
+                                        ? 'В фоне переводится «${p.activeBookTitle}» — глава ${p.currentChapter}...'
+                                        : p.isPausedOffline
+                                            ? 'Нет сети — перевод на паузе. Ждём подключение...'
+                                            : p.rateLimitWaitSeconds > 0
+                                                ? 'Все модели в лимите — ждём квоту: ${_formatWaitTime(p.rateLimitWaitSeconds)}...'
+                                                : p.errorMessage != null
+                                                    ? 'Ошибка: ${p.errorMessage}'
+                                                    : 'Глава ${p.currentChapter} (в очереди ${p.totalChaptersInJob})$modelBadge: '
+                                                        'абзацев ${p.translatedParagraphsInChapter}/${p.totalParagraphsInChapter}',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: p.errorMessage != null
+                                          ? Colors.redAccent
+                                          : p.rateLimitWaitSeconds > 0
+                                              ? Colors.orangeAccent
+                                              : palette.accent,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                    if (_chapters.isNotEmpty)
+                      Container(
+                        color: palette.background,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 2,
                         ),
-            ),
-          ],
+                        child: Row(
+                          children: [
+                            IconButton(
+                              onPressed: _currentChapterIndex > 0
+                                  ? () => _loadChapter(_currentChapterIndex - 1)
+                                  : null,
+                              icon: Icon(
+                                Icons.arrow_back_ios,
+                                size: 16,
+                                color: palette.text,
+                              ),
+                            ),
+                            Expanded(
+                              child: InkWell(
+                                onTap: _openTocAndBookmarksSheet,
+                                borderRadius: BorderRadius.circular(8),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 8,
+                                    horizontal: 6,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        Icons.toc,
+                                        size: 18,
+                                        color: palette.accent,
+                                      ),
+                                      const SizedBox(width: 6),
+                                      Expanded(
+                                        child: Text(
+                                          '${_currentChapterIndex + 1}. $currentChapterTitle [${_statusLabel(_chapters[_currentChapterIndex].status)}]',
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            color: palette.text,
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                              onPressed:
+                                  _currentChapterIndex < _chapters.length - 1
+                                      ? () =>
+                                          _loadChapter(_currentChapterIndex + 1)
+                                      : null,
+                              icon: Icon(
+                                Icons.arrow_forward_ios,
+                                size: 16,
+                                color: palette.text,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    if (_appearance.showOriginal && !_mlKitModelReady)
+                      Container(
+                        width: double.infinity,
+                        color: palette.accent.withOpacity(0.14),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.flash_on,
+                              size: 16,
+                              color: palette.accent,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'Для мгновенной подсветки старых глав скачайте словарь (~30 МБ)',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: palette.text,
+                                ),
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: _downloadingDictInReader
+                                  ? null
+                                  : _downloadBilingualDictionary,
+                              child: _downloadingDictInReader
+                                  ? SizedBox(
+                                      width: 14,
+                                      height: 14,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: palette.accent,
+                                      ),
+                                    )
+                                  : Text(
+                                      'Скачать',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.bold,
+                                        color: palette.accent,
+                                      ),
+                                    ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    Divider(
+                      height: 1,
+                      color: palette.secondaryText.withOpacity(0.2),
+                    ),
+                  ],
+                  Expanded(
+                    child: _loadingChapter
+                        ? Center(
+                            child: CircularProgressIndicator(
+                              color: palette.accent,
+                            ),
+                          )
+                        : _appearance.pageMode == ReaderPageMode.scroll
+                            ? _buildScrollReader(palette, currentChapterTitle)
+                            : BookPageView(
+                                key: ValueKey(
+                                  'book_view_$_currentChapterIndex',
+                                ),
+                                chapterTitle: currentChapterTitle,
+                                paragraphs: _paragraphs,
+                                chapterBookmarks: chapterBookmarks,
+                                appearance: _appearance,
+                                palette: palette,
+                                initialPage: _currentPageInChapter,
+                                onPageChanged: (page) {
+                                  _currentPageInChapter = page;
+                                  _scheduleSaveReadingProgress();
+                                },
+                                onCenterTap: () {
+                                  setState(
+                                    () => _showControls = !_showControls,
+                                  );
+                                },
+                                onNextChapter: () {
+                                  if (_currentChapterIndex <
+                                      _chapters.length - 1) {
+                                    _loadChapter(_currentChapterIndex + 1);
+                                  }
+                                },
+                                onPrevChapter: () {
+                                  if (_currentChapterIndex > 0) {
+                                    _loadChapter(_currentChapterIndex - 1);
+                                  }
+                                },
+                                onTranslateHere: () => _startQueue(
+                                  overrideMode: TranslateMode.specificChapter,
+                                ),
+                                onTranslateSelection:
+                                    _showSelectionTranslationSheet,
+                                onSaveSelectionToDictionary:
+                                    _saveToDictionaryDirectly,
+                                onHighlightSelection: _saveHighlightedQuote,
+                                onBrightnessDelta: _handleBrightnessDelta,
+                                onLookupWordInContext: _lookupWordInContext,
+                              ),
+                  ),
+                ],
+              ),
+
+              // Фильтр синего света (тёплый янтарный ночной фильтр поверх страницы)
+              if (_appearance.blueLightFilter > 0.01)
+                IgnorePointer(
+                  child: Container(
+                    color: const Color(0xFFFF8F00)
+                        .withOpacity(_appearance.blueLightFilter),
+                  ),
+                ),
+
+              // Свайп-затемнение экрана по левому краю
+              if (_dimOverlay > 0.01)
+                IgnorePointer(
+                  child: Container(
+                    color: Colors.black.withOpacity(_dimOverlay),
+                  ),
+                ),
+
+              if (_showBrightnessHud)
+                Center(
+                  child: IgnorePointer(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 12,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black87,
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.brightness_medium,
+                            color: Colors.amber,
+                            size: 22,
+                          ),
+                          const SizedBox(width: 10),
+                          Text(
+                            'Яркость: ${((1.0 - _dimOverlay) * 100).round()}%',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -1637,6 +2371,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
         ),
       );
     }
+
+    final fontFam = _appearance.flutterFontFamily;
 
     return SelectionArea(
       onSelectionChanged: (SelectedContent? content) {
@@ -1660,6 +2396,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 _saveToDictionaryDirectly(cleanText);
               },
             ),
+            ContextMenuButtonItem(
+              label: 'В цитаты',
+              onPressed: () {
+                selectableRegionState.hideToolbar();
+                _saveHighlightedQuote(cleanText, 0xFFFFD54F, 0);
+              },
+            ),
           ],
           ...selectableRegionState.contextMenuButtonItems,
         ];
@@ -1670,7 +2413,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
       },
       child: ListView.builder(
         controller: _scrollController,
-        padding: const EdgeInsets.fromLTRB(20, 18, 20, 48),
+        padding: EdgeInsets.fromLTRB(
+          _appearance.horizontalMargin,
+          18,
+          _appearance.horizontalMargin,
+          48,
+        ),
         itemCount: _paragraphs.length + 1,
         itemBuilder: (context, index) {
           if (index == 0) {
@@ -1679,6 +2427,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
               child: Text(
                 currentChapterTitle,
                 style: TextStyle(
+                  fontFamily: fontFam,
                   fontSize: _appearance.fontSize + 5,
                   fontWeight: FontWeight.bold,
                   height: 1.3,
@@ -1691,24 +2440,34 @@ class _ReaderScreenState extends State<ReaderScreen> {
           final p = _paragraphs[index - 1];
           final hasTranslation = p.isTranslated;
           final translatedStyle = TextStyle(
+            fontFamily: fontFam,
             fontSize: _appearance.fontSize,
             height: _appearance.lineHeight,
             color: palette.text,
           );
           final originalStyle = TextStyle(
+            fontFamily: fontFam,
             fontSize: (_appearance.fontSize - 3.5).clamp(11.0, 24.0),
             height: 1.38,
             color: palette.secondaryText,
             fontStyle: FontStyle.italic,
           );
 
+          final formattedSrc = _appearance.paragraphIndent
+              ? '\u00A0\u00A0\u00A0\u00A0${p.sourceText.trim()}'
+              : p.sourceText.trim();
+
           return Padding(
-            padding: const EdgeInsets.only(bottom: 14),
+            padding: const EdgeInsets.only(bottom: 12),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (_appearance.isOriginalOnly)
-                  Text(p.sourceText, style: translatedStyle)
+                  Text(
+                    formattedSrc,
+                    textAlign: _appearance.textAlign,
+                    style: translatedStyle,
+                  )
                 else if (hasTranslation && _appearance.showOriginal)
                   _buildScrollInteractiveText(
                     palette: palette,
@@ -1718,15 +2477,23 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     isOriginalText: false,
                   )
                 else if (hasTranslation)
-                  Text(p.translatedText!, style: translatedStyle)
+                  Text(
+                    _appearance.paragraphIndent
+                        ? '\u00A0\u00A0\u00A0\u00A0${p.translatedText!.trim()}'
+                        : p.translatedText!.trim(),
+                    textAlign: _appearance.textAlign,
+                    style: translatedStyle,
+                  )
                 else
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Expanded(
                         child: Text(
-                          p.sourceText,
+                          formattedSrc,
+                          textAlign: _appearance.textAlign,
                           style: TextStyle(
+                            fontFamily: fontFam,
                             fontSize: _appearance.fontSize - 1,
                             height: _appearance.lineHeight,
                             color: palette.secondaryText,
