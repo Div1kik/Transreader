@@ -36,6 +36,7 @@ class _SettingsScreenState extends State<SettingsScreen>
     with WidgetsBindingObserver {
   final SettingsService _settingsService = SettingsService();
   late TranslationEngineMode _engineMode;
+  late TranslationStyleMode _styleMode;
   late bool _fallbackToOfflineOnError;
   late TextEditingController _langController;
 
@@ -114,6 +115,7 @@ class _SettingsScreenState extends State<SettingsScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _engineMode = widget.initialSettings.engineMode;
+    _styleMode = widget.initialSettings.styleMode;
     _fallbackToOfflineOnError =
         widget.initialSettings.fallbackToOfflineOnError;
     _langController =
@@ -621,6 +623,7 @@ class _SettingsScreenState extends State<SettingsScreen>
 
     return TranslatorSettings(
       engineMode: _engineMode,
+      styleMode: _styleMode,
       endpointUrl: activeFirst?.endpointUrl ?? _groqEndpoint,
       apiKey: activeFirst?.apiKey ?? '',
       model: activeFirst?.models.firstOrNull ?? 'llama-3.3-70b-versatile',
@@ -809,6 +812,52 @@ class _SettingsScreenState extends State<SettingsScreen>
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          // Стиль перевода: Художественный / Технический (PDF, стандарты, документы)
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.style_outlined, color: accent),
+                      const SizedBox(width: 8),
+                      const Text(
+                        'Стиль перевода текста',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  SegmentedButton<TranslationStyleMode>(
+                    segments: const [
+                      ButtonSegment(
+                        value: TranslationStyleMode.literary,
+                        icon: Icon(Icons.auto_stories, size: 18),
+                        label: Text('Художественный'),
+                      ),
+                      ButtonSegment(
+                        value: TranslationStyleMode.technical,
+                        icon: Icon(Icons.engineering_outlined, size: 18),
+                        label: Text('Технический (PDF)'),
+                      ),
+                    ],
+                    selected: {_styleMode},
+                    onSelectionChanged: (set) {
+                      setState(() => _styleMode = set.first);
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 12),
+
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
