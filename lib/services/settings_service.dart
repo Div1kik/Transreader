@@ -7,6 +7,11 @@ enum TranslationEngineMode {
   customApi,
 }
 
+enum TranslationStyleMode {
+  literary,
+  technical,
+}
+
 class ApiProviderProfile {
   final String id;
   final String name;
@@ -77,6 +82,7 @@ class ApiProviderProfile {
 
 class TranslatorSettings {
   final TranslationEngineMode engineMode;
+  final TranslationStyleMode styleMode;
   final String endpointUrl;
   final String apiKey;
   final String model;
@@ -87,6 +93,7 @@ class TranslatorSettings {
 
   const TranslatorSettings({
     this.engineMode = TranslationEngineMode.groqCloud,
+    this.styleMode = TranslationStyleMode.literary,
     this.endpointUrl = 'https://api.groq.com/openai/v1/chat/completions',
     this.apiKey = '',
     this.model = 'llama-3.3-70b-versatile',
@@ -113,7 +120,6 @@ class TranslatorSettings {
     return list;
   }
 
-  /// Возвращает упорядоченный список всех активных провайдеров с заполненным ключом
   List<ApiProviderProfile> get effectiveProviders {
     final result = <ApiProviderProfile>[];
 
@@ -153,6 +159,7 @@ class TranslatorSettings {
 
   TranslatorSettings copyWith({
     TranslationEngineMode? engineMode,
+    TranslationStyleMode? styleMode,
     String? endpointUrl,
     String? apiKey,
     String? model,
@@ -163,6 +170,7 @@ class TranslatorSettings {
   }) {
     return TranslatorSettings(
       engineMode: engineMode ?? this.engineMode,
+      styleMode: styleMode ?? this.styleMode,
       endpointUrl: endpointUrl ?? this.endpointUrl,
       apiKey: apiKey ?? this.apiKey,
       model: model ?? this.model,
@@ -177,6 +185,7 @@ class TranslatorSettings {
 
 class SettingsService {
   static const _kEngineMode = 'translator_engine_mode';
+  static const _kStyleMode = 'translator_style_mode';
   static const _kEndpoint = 'translator_endpoint';
   static const _kApiKey = 'translator_api_key';
   static const _kModel = 'translator_model';
@@ -205,12 +214,14 @@ class SettingsService {
     final prefs = await SharedPreferences.getInstance();
     final modeIdx =
         prefs.getInt(_kEngineMode) ?? TranslationEngineMode.groqCloud.index;
+    final styleIdx =
+        prefs.getInt(_kStyleMode) ?? TranslationStyleMode.literary.index;
 
     final savedEndpoint = prefs.getString(_kEndpoint) ?? '';
-    final effectiveEndpoint = savedEndpoint.isEmpty ||
-            savedEndpoint.contains('openrouter.ai')
-        ? 'https://api.groq.com/openai/v1/chat/completions'
-        : savedEndpoint;
+    final effectiveEndpoint =
+        savedEndpoint.isEmpty || savedEndpoint.contains('openrouter.ai')
+            ? 'https://api.groq.com/openai/v1/chat/completions'
+            : savedEndpoint;
 
     final savedModel = prefs.getString(_kModel) ?? '';
     final effectiveModel =
@@ -236,7 +247,6 @@ class SettingsService {
           loadedProviders = decoded.whereType().map((m) {
             var profile =
                 ApiProviderProfile.fromMap(Map<String, dynamic>.from(m));
-            // Автообновление закрытых моделей Gemini на актуальные в уже сохранённых настройках
             if (profile.endpointUrl
                 .contains('generativelanguage.googleapis.com')) {
               final hasDeprecated = profile.models
@@ -275,6 +285,8 @@ class SettingsService {
     final settings = TranslatorSettings(
       engineMode: TranslationEngineMode
           .values[modeIdx.clamp(0, TranslationEngineMode.values.length - 1)],
+      styleMode: TranslationStyleMode
+          .values[styleIdx.clamp(0, TranslationStyleMode.values.length - 1)],
       endpointUrl: effectiveEndpoint,
       apiKey: savedApiKey,
       model: effectiveModel,
@@ -294,6 +306,7 @@ class SettingsService {
   Future<void> saveSettings(TranslatorSettings settings) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_kEngineMode, settings.engineMode.index);
+    await prefs.setInt(_kStyleMode, settings.styleMode.index);
     await prefs.setString(_kEndpoint, settings.endpointUrl.trim());
     await prefs.setString(_kApiKey, settings.apiKey.trim());
     await prefs.setString(_kModel, settings.model.trim());
