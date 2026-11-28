@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 enum ChapterStatus {
   pending,
   inProgress,
@@ -110,6 +112,7 @@ class ParagraphItem {
   final int orderIndex;
   final String sourceText;
   final String? translatedText;
+  final Map<String, String> wordAlignMap;
 
   const ParagraphItem({
     this.id,
@@ -118,6 +121,7 @@ class ParagraphItem {
     required this.orderIndex,
     required this.sourceText,
     this.translatedText,
+    this.wordAlignMap = const {},
   });
 
   bool get isTranslated =>
@@ -131,10 +135,27 @@ class ParagraphItem {
       'orderIndex': orderIndex,
       'sourceText': sourceText,
       'translatedText': translatedText,
+      'wordAlignJson': wordAlignMap.isEmpty ? null : jsonEncode(wordAlignMap),
     };
   }
 
   factory ParagraphItem.fromMap(Map<String, dynamic> map) {
+    Map<String, String> parsedAlign = const {};
+    final rawJson = map['wordAlignJson'] as String?;
+    if (rawJson != null && rawJson.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawJson);
+        if (decoded is Map) {
+          parsedAlign = decoded.map(
+            (k, v) => MapEntry(
+              k.toString().toLowerCase().trim(),
+              v.toString().toLowerCase().trim(),
+            ),
+          );
+        }
+      } catch (_) {}
+    }
+
     return ParagraphItem(
       id: map['id'] as int?,
       bookId: map['bookId'] as String,
@@ -142,6 +163,7 @@ class ParagraphItem {
       orderIndex: map['orderIndex'] as int,
       sourceText: map['sourceText'] as String,
       translatedText: map['translatedText'] as String?,
+      wordAlignMap: parsedAlign,
     );
   }
 }
