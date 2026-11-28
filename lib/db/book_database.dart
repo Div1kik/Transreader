@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart';
@@ -27,21 +28,30 @@ class BookDatabase {
     ''');
 
     final bookColumns = await db.rawQuery('PRAGMA table_info(books)');
-    final colNames = bookColumns.map((c) => c['name'].toString()).toSet();
+    final bookColNames = bookColumns.map((c) => c['name'].toString()).toSet();
 
-    if (!colNames.contains('lastChapterIndex')) {
+    if (!bookColNames.contains('lastChapterIndex')) {
       await db.execute(
         'ALTER TABLE books ADD COLUMN lastChapterIndex INTEGER NOT NULL DEFAULT 0',
       );
     }
-    if (!colNames.contains('lastPageIndex')) {
+    if (!bookColNames.contains('lastPageIndex')) {
       await db.execute(
         'ALTER TABLE books ADD COLUMN lastPageIndex INTEGER NOT NULL DEFAULT 0',
       );
     }
-    if (!colNames.contains('lastScrollOffset')) {
+    if (!bookColNames.contains('lastScrollOffset')) {
       await db.execute(
         'ALTER TABLE books ADD COLUMN lastScrollOffset REAL NOT NULL DEFAULT 0.0',
+      );
+    }
+
+    final paraColumns = await db.rawQuery('PRAGMA table_info(paragraphs)');
+    final paraColNames = paraColumns.map((c) => c['name'].toString()).toSet();
+
+    if (!paraColNames.contains('wordAlignJson')) {
+      await db.execute(
+        'ALTER TABLE paragraphs ADD COLUMN wordAlignJson TEXT',
       );
     }
   }
@@ -51,7 +61,7 @@ class BookDatabase {
     final path = await getDatabaseFilePath();
     _db = await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE books (
@@ -82,7 +92,8 @@ class BookDatabase {
             chapterIndex INTEGER NOT NULL,
             orderIndex INTEGER NOT NULL,
             sourceText TEXT NOT NULL,
-            translatedText TEXT
+            translatedText TEXT,
+            wordAlignJson TEXT
           )
         ''');
 
@@ -247,12 +258,16 @@ class BookDatabase {
 
   Future<void> updateParagraphTranslation(
     int paragraphId,
-    String translatedText,
-  ) async {
+    String translatedText, {
+    Map<String, String> wordAlignMap = const {},
+  }) async {
     final db = await database;
     await db.update(
       'paragraphs',
-      {'translatedText': translatedText},
+      {
+        'translatedText': translatedText,
+        'wordAlignJson': wordAlignMap.isEmpty ? null : jsonEncode(wordAlignMap),
+      },
       where: 'id = ?',
       whereArgs: [paragraphId],
     );
@@ -272,7 +287,6 @@ class BookDatabase {
     );
   }
 
-  /// Сбрасывает существующий перевод для выбранных глав (или всей книги), чтобы перевести заново
   Future<void> clearTranslationsForChapters(
     String bookId,
     List<int> chapterIndices,
@@ -283,7 +297,7 @@ class BookDatabase {
       for (final chIdx in chapterIndices) {
         await txn.update(
           'paragraphs',
-          {'translatedText': null},
+          {'translatedText': null, 'wordAlignJson': null},
           where: 'bookId = ? AND chapterIndex = ?',
           whereArgs: [bookId, chIdx],
         );
